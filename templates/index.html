@@ -1,1 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cipher — Private Messaging</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
 
+<!-- AUTH SCREEN -->
+<div id="auth-screen" class="screen">
+  <div class="auth-box">
+    <h1 class="logo">CIPHER</h1>
+    <p class="tagline">Messages that don't stay forever.</p>
+    <div class="tabs">
+      <button class="tab active" data-tab="login">Log in</button>
+      <button class="tab" data-tab="signup">Sign up</button>
+    </div>
+    <form id="auth-form">
+      <input type="text" id="auth-username" placeholder="Username" autocomplete="username" required>
+      <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required>
+      <input type="text" id="auth-invite" placeholder="Invite code (optional)" style="display:none">
+      <button type="submit" id="auth-submit">Log in</button>
+      <p id="auth-error" class="error"></p>
+    </form>
+  </div>
+</div>
+
+<!-- APP SCREEN -->
+<div id="app-screen" class="screen hidden">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>CIPHER</h2>
+      <div class="user-tag">
+        <span id="my-username">?</span>
+        <button id="logout-btn" title="Log out">⏻</button>
+      </div>
+    </div>
+    <button id="new-chat-btn" class="primary-btn">+ New Chat</button>
+    <button id="invites-btn" class="secondary-btn">🎟️ Invites</button>
+    <button id="admin-btn" class="secondary-btn hidden">⚙️ Admin</button>
+    <div id="conv-list" class="conv-list"></div>
+  </aside>
+
+  <main class="main">
+    <div id="empty-state" class="empty-state">
+      <p>Select a conversation or start a new one.</p>
+    </div>
+    <div id="chat-view" class="chat-view hidden">
+      <div class="chat-header">
+        <h3 id="chat-title">Chat</h3>
+      </div>
+      <div id="messages" class="messages"></div>
+      <form id="msg-form" class="msg-form">
+        <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
+        <button type="submit">Send</button>
+      </form>
+    </div>
+  </main>
+</div>
+
+<!-- MODAL -->
+<div id="modal-bg" class="modal-bg hidden">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">×</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
