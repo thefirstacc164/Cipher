@@ -303,3 +303,24 @@ function escapeHtml(s) {
 
 // Start
 checkSession();
+// ============ CREDITS ============
+function showCredits() {
+  showModal(`
+    <div class="credits-box">
+      <div class="credits-logo">CIPHER</div>
+      <div class="credits-version">v0.1.0 · BETA · БЕТА</div>
+
+      <div class="credits-line">— A solo project by —</div>
+      <div class="credits-name">STEPUNDRIK</div>
+      <div class="credits-roles">
+        Frontend · Backend · Database<br>
+        Design · Deployment · Everything
+      </div>
+
+      <div class="credits-line">Built from scratch. Zero team. Full vision.</div>
+
+      <div class="credits-heart">Made with 🖤 and too much cyan.</div>
+      <div class="credits-copy">© 2025 Stepundrik · All rights reserved</div>
+    </div>
+  `);
+}
