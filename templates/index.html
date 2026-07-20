@@ -3,113 +3,194 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cipher — Private Messaging (BETA)</title>
+<title>Cipher — Private Messaging</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- BETA RIBBON -->
-<div class="beta-ribbon">
-  <span class="beta-en">BETA</span>
-  <span class="beta-ru">БЕТА</span>
+<!-- Ambient glow background -->
+<div class="ambient-bg">
+  <div class="glow glow-1"></div>
+  <div class="glow glow-2"></div>
 </div>
 
-<!-- ANNOUNCEMENT BANNER (dynamic) -->
+<!-- Announcement banner -->
 <div id="announcement-bar" class="announcement-bar hidden"></div>
 
-<!-- AUTH SCREEN -->
+<!-- ============================================
+     AUTH SCREEN
+============================================ -->
 <div id="auth-screen" class="screen">
-  <div class="auth-box">
-    <div class="logo-wrap">
-      <h1 class="logo">CIPHER</h1>
-      <span class="beta-badge">BETA v0.2.0</span>
+  <div class="auth-container">
+    <div class="auth-brand">
+      <div class="brand-logo">CIPHER</div>
+      <div class="brand-tag">Private messaging, no traces left.</div>
     </div>
-    <p class="tagline">Messages that don't stay forever.</p>
-    <p class="nadpis">надпись: закрытая бета · private beta</p>
-    <div class="tabs">
-      <button class="tab active" data-tab="login">Log in</button>
-      <button class="tab" data-tab="signup">Sign up</button>
+
+    <div class="auth-card">
+      <div class="tabs">
+        <button class="tab active" data-tab="login">Sign in</button>
+        <button class="tab" data-tab="signup">Create account</button>
+      </div>
+
+      <form id="auth-form" class="auth-form">
+        <div class="field">
+          <label>Username</label>
+          <input type="text" id="auth-username" placeholder="your_name" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password" required>
+        </div>
+        <div class="field hidden" id="invite-field">
+          <label>Invite code <span class="optional">(optional)</span></label>
+          <input type="text" id="auth-invite" placeholder="Paste invite code">
+        </div>
+        <button type="submit" id="auth-submit" class="btn-primary btn-lg">Sign in</button>
+        <p id="auth-error" class="form-msg error"></p>
+      </form>
+
+      <div class="auth-footer">
+        <button class="link-btn" onclick="showRecover()">Forgot password?</button>
+        <span class="dot">•</span>
+        <button class="link-btn" onclick="showCredits()">About</button>
+      </div>
     </div>
-    <form id="auth-form">
-      <input type="text" id="auth-username" placeholder="Username" autocomplete="username" required>
-      <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required>
-      <input type="text" id="auth-invite" placeholder="Invite code (optional)" style="display:none">
-      <button type="submit" id="auth-submit">Log in</button>
-      <p id="auth-error" class="error"></p>
-    </form>
-    <div class="auth-footer">
-      <button class="link-btn" onclick="showRecover()">Forgot password?</button>
-      <span class="dot">·</span>
-      <button class="link-btn" onclick="showCredits()">Credits</button>
-      <span class="dot">·</span>
-      <span class="author-tag">by <b>Stepundrik</b></span>
+
+    <div class="auth-meta">
+      <span>v1.0.0</span>
+      <span class="dot">•</span>
+      <span>by <b>Stepundrik</b></span>
     </div>
   </div>
 </div>
 
-<!-- APP SCREEN -->
+<!-- ============================================
+     APP SCREEN
+============================================ -->
 <div id="app-screen" class="screen hidden">
   <aside class="sidebar">
-    <div class="sidebar-header">
-      <h2>CIPHER <span class="beta-mini">BETA</span></h2>
-      <div class="user-tag">
-        <span id="my-username">?</span>
-        <button id="logout-btn" title="Log out">⏻</button>
+    <div class="sidebar-brand">
+      <div class="brand-mini">CIPHER</div>
+      <button class="icon-btn ghost" id="logout-btn" title="Sign out">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+      </button>
+    </div>
+
+    <div class="me-card">
+      <div class="me-avatar" id="me-avatar">?</div>
+      <div class="me-info">
+        <div class="me-name" id="my-username">?</div>
+        <div class="me-status">Online</div>
       </div>
     </div>
-    <button id="new-chat-btn" class="primary-btn">+ New Chat</button>
-    <div class="btn-row">
-      <button id="search-btn" class="secondary-btn" title="Search">🔍</button>
-      <button id="invites-btn" class="secondary-btn" title="Invites">🎟️</button>
-      <button id="settings-btn" class="secondary-btn" title="Settings">⚙️</button>
-      <button id="admin-btn" class="secondary-btn hidden" title="Admin">👑</button>
+
+    <button id="new-chat-btn" class="btn-primary btn-with-icon">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      New chat
+    </button>
+
+    <div class="tool-grid">
+      <button id="search-btn" class="tool-btn" title="Search">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      </button>
+      <button id="invites-btn" class="tool-btn" title="Invites">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
+      </button>
+      <button id="settings-btn" class="tool-btn" title="Settings">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      </button>
+      <button id="admin-btn" class="tool-btn hidden" title="Admin">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20L12 4 2 20z"></path><path d="M12 9v4"></path><circle cx="12" cy="17" r="0.5" fill="currentColor"></circle></svg>
+      </button>
     </div>
+
+    <div class="conv-header">Conversations</div>
     <div id="conv-list" class="conv-list"></div>
+
     <div class="sidebar-footer">
-      <button class="link-btn" onclick="showCredits()">Credits</button>
-      <span class="version-tag">v0.2.0 · БЕТА</span>
+      <button class="link-btn tiny" onclick="showCredits()">About Cipher</button>
+      <div class="version">v1.0.0</div>
     </div>
   </aside>
 
   <main class="main">
+    <!-- Empty state -->
     <div id="empty-state" class="empty-state">
       <div class="empty-logo">CIPHER</div>
-      <p>Select a conversation or start a new one.</p>
+      <h2>Welcome, <span id="empty-username">friend</span></h2>
+      <p>Select a chat or start a new conversation.</p>
+      <button class="btn-primary" onclick="document.getElementById('new-chat-btn').click()">Start a new chat</button>
     </div>
+
+    <!-- Chat view -->
     <div id="chat-view" class="chat-view hidden">
-      <div class="chat-header">
-        <h3 id="chat-title">Chat</h3>
-        <div class="chat-actions">
-          <button class="mini-btn" onclick="muteCurrent()" id="mute-btn">🔔</button>
-          <button class="mini-btn" onclick="exportCurrent()">📥</button>
-          <button class="mini-btn danger" onclick="leaveCurrent()">🚪</button>
+      <header class="chat-header">
+        <div class="chat-title-block">
+          <div class="chat-avatar" id="chat-avatar">?</div>
+          <div>
+            <h3 id="chat-title">Chat</h3>
+            <div id="chat-subtitle" class="chat-subtitle"></div>
+          </div>
         </div>
-      </div>
-      <div id="typing-indicator" class="typing-indicator hidden"></div>
+        <div class="chat-actions">
+          <button class="icon-btn ghost" onclick="muteCurrent()" id="mute-btn" title="Mute">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+          </button>
+          <button class="icon-btn ghost" onclick="exportCurrent()" title="Export">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          </button>
+          <button class="icon-btn ghost danger" onclick="leaveCurrent()" title="Leave">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+          </button>
+        </div>
+      </header>
+
       <div id="messages" class="messages"></div>
-      <form id="msg-form" class="msg-form">
-        <button type="button" class="icon-btn" onclick="document.getElementById('img-input').click()" title="Send image">📷</button>
-        <input type="file" id="img-input" accept="image/*" style="display:none" onchange="handleImageSelect(event)">
-        <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
-        <button type="submit">Send</button>
-      </form>
+
+      <div id="typing-indicator" class="typing-indicator hidden">
+        <span class="dots"><span></span><span></span><span></span></span>
+        <span id="typing-text"></span>
+      </div>
+
       <div id="image-preview" class="image-preview hidden"></div>
+
+      <form id="msg-form" class="msg-form">
+        <button type="button" class="composer-btn" onclick="document.getElementById('img-input').click()" title="Send image">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+        </button>
+        <input type="file" id="img-input" accept="image/*" style="display:none" onchange="handleImageSelect(event)">
+        <div class="composer-input-wrap">
+          <input type="text" id="msg-input" placeholder="Write a message..." autocomplete="off">
+        </div>
+        <button type="submit" class="composer-send" title="Send">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        </button>
+      </form>
     </div>
   </main>
 </div>
 
-<!-- MODAL -->
+<!-- ============================================
+     MODAL
+============================================ -->
 <div id="modal-bg" class="modal-bg hidden">
   <div class="modal">
-    <button class="modal-close" onclick="closeModal()">×</button>
+    <button class="modal-close" onclick="closeModal()" title="Close">×</button>
     <div id="modal-content"></div>
   </div>
 </div>
 
-<!-- IMAGE VIEWER -->
+<!-- Image viewer -->
 <div id="img-viewer" class="img-viewer hidden" onclick="this.classList.add('hidden')">
   <img id="img-viewer-img" src="" alt="">
 </div>
+
+<!-- Toast notifications -->
+<div id="toast-container" class="toast-container"></div>
 
 <script src="/static/app.js"></script>
 </body>
