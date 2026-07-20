@@ -8,7 +8,7 @@
 import os
 import io
 import base64
-import json
+import hashlib
 import secrets
 import bcrypt
 import pyotp
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import (
     Flask, request, jsonify, render_template,
-    session, redirect, url_for, Response, send_file
+    session, Response
 )
 from supabase import create_client, Client
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,7 +27,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # ============================================================
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", secrets.token_hex(32))
-app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024  # 12 MB
+app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
@@ -42,10 +42,32 @@ else:
     sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ============================================================
+#   POLLING CONFIG (sent to frontend)
+# ============================================================
+POLL_CONFIG = {
+    "active_ms": 3000,        # active chat, recent activity
+    "idle_ms": 8000,          # no new messages for a while
+    "very_idle_ms": 15000,    # long idle
+    "hidden_ms": 30000,       # tab is hidden
+    "idle_after_cycles": 5,   # after this many polls with no changes, slow down
+    "very_idle_after_cycles": 20
+}
+
+# ============================================================
+#   ANTI-SPAM CONFIG
+# ============================================================
+SPAM_WINDOW_SECONDS = 10
+SPAM_MSG_THRESHOLD = 8         # more than this in window = spam
+SPAM_DUPLICATE_THRESHOLD = 3    # this many identical in a row = spam
+SPAM_WARNING_COOLDOWN = 30      # min seconds between warnings
+
+# Throttle delay per level (ms hint for frontend)
+THROTTLE_DELAY_MS = {0: 0, 1: 0, 2: 3000, 3: 3000, 4: 0, 5: 0}
+
+# ============================================================
 #   HELPERS
 # ============================================================
 def get_ip():
-    """Get client IP, respecting X-Forwarded-For header."""
     fwd = request.headers.get("X-Forwarded-For", "")
     if fwd:
         return fwd.split(",")[0].strip()
@@ -56,8 +78,24 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def hash_content(content):
+    return hashlib.md5((content or "").encode()).hexdigest()[:16]
+
+
+def is_immune(user):
+    """Owner is always immune. Others must be in immunity_list."""
+    if not user:
+        return False
+    if user.get("is_owner"):
+        return True
+    try:
+        res = sb.table("immunity_list").select("id").eq("username", user["username"]).execute().data
+        return len(res) > 0
+    except Exception:
+        return False
+
+
 def is_ip_banned(ip):
-    """Check if an IP is banned. Handles expired bans gracefully."""
     if not sb or not ip:
         return False
     try:
@@ -68,12 +106,10 @@ def is_ip_banned(ip):
         if ban.get("expires_at"):
             exp = datetime.fromisoformat(ban["expires_at"].replace("Z", "+00:00"))
             if exp < datetime.now(timezone.utc):
-                # Expired, auto-cleanup
                 sb.table("bans").delete().eq("ip_address", ip).execute()
                 return False
         return True
-    except Exception as e:
-        print(f"[is_ip_banned] {e}")
+    except Exception:
         return False
 
 
@@ -127,7 +163,6 @@ def current_user():
 
 
 def audit(action, target_type=None, target_id=None, details=None):
-    """Log admin actions for the audit trail."""
     try:
         u = current_user()
         if not u:
@@ -146,7 +181,6 @@ def audit(action, target_type=None, target_id=None, details=None):
 
 
 def generate_recovery_phrase():
-    """Generate a random 12-word recovery phrase."""
     wordlist = [
         "cipher", "shadow", "vault", "echo", "raven", "cobalt", "onyx", "quartz",
         "zenith", "void", "phantom", "spectre", "glacier", "aurora", "nebula",
@@ -159,25 +193,170 @@ def generate_recovery_phrase():
 
 
 # ============================================================
-#   BEFORE-REQUEST: IP BAN CHECK
+#   ANTI-SPAM: check + apply warnings/throttle
+# ============================================================
+def check_spam(user, content):
+    """
+    Returns: (throttle_delay_ms, warning_message_or_None)
+    Records events. Applies throttle upgrades.
+    Immune users always pass.
+    """
+    if is_immune(user):
+        return 0, None
+
+    uid = user["id"]
+    now = datetime.now(timezone.utc)
+    window_start = (now - timedelta(seconds=SPAM_WINDOW_SECONDS)).isoformat()
+
+    # Check active throttle level
+    level = user.get("throttle_level", 0) or 0
+    throttle_until = user.get("throttle_until")
+
+    # Check if throttle expired
+    if throttle_until:
+        try:
+            exp = datetime.fromisoformat(throttle_until.replace("Z", "+00:00"))
+            if exp < now and level in (2,):
+                # level 2 was time-limited, reset to 1
+                sb.table("users").update({
+                    "throttle_level": 1,
+                    "throttle_until": None
+                }).eq("id", uid).execute()
+                level = 1
+        except Exception:
+            pass
+
+    # Level 3+ = permanent throttle, always apply delay
+    current_delay = THROTTLE_DELAY_MS.get(level, 0)
+
+    # Insert this message into recent_messages
+    content_hash = hash_content(content)
+    try:
+        sb.table("recent_messages").insert({
+            "user_id": uid,
+            "content_hash": content_hash
+        }).execute()
+    except Exception:
+        pass
+
+    # Count messages in window
+    try:
+        recent = sb.table("recent_messages").select("content_hash").eq("user_id", uid).gt("created_at", window_start).execute().data
+    except Exception:
+        recent = []
+
+    msg_count = len(recent)
+    duplicate_count = sum(1 for r in recent if r["content_hash"] == content_hash)
+
+    is_spam = False
+    reason = None
+    if msg_count > SPAM_MSG_THRESHOLD:
+        is_spam = True
+        reason = f"{msg_count} messages in {SPAM_WINDOW_SECONDS}s"
+    elif duplicate_count >= SPAM_DUPLICATE_THRESHOLD:
+        is_spam = True
+        reason = f"{duplicate_count} identical messages"
+
+    if not is_spam:
+        return current_delay, None
+
+    # Cooldown check — don't warn if last warning was recent
+    last_warn = user.get("last_warning_at")
+    if last_warn:
+        try:
+            lw = datetime.fromisoformat(last_warn.replace("Z", "+00:00"))
+            if (now - lw).total_seconds() < SPAM_WARNING_COOLDOWN:
+                return current_delay, None
+        except Exception:
+            pass
+
+    # Escalate warning
+    warnings = (user.get("spam_warnings", 0) or 0) + 1
+
+    warning_msg = ""
+    updates = {
+        "spam_warnings": warnings,
+        "last_warning_at": now.isoformat()
+    }
+
+    if warnings == 1:
+        warning_msg = "⚠️ Slow down. Warning 1 of 5. If you continue, your account will be throttled."
+    elif warnings == 2:
+        updates["throttle_level"] = 2
+        updates["throttle_until"] = (now + timedelta(days=30)).isoformat()
+        warning_msg = "⚠️ Warning 2 of 5. Your account is now throttled for 30 days — your messages will send with a delay."
+    elif warnings == 3:
+        updates["throttle_level"] = 3
+        updates["throttle_until"] = None
+        warning_msg = "⚠️ Warning 3 of 5. The throttle on your account is now PERMANENT."
+    elif warnings == 4:
+        updates["throttle_level"] = 4
+        # 24h ban via user_punishments
+        try:
+            sb.table("user_punishments").insert({
+                "user_id": uid,
+                "punished_by": None,
+                "type": "ban",
+                "reason": "Auto-ban: 4th spam warning",
+                "expires_at": (now + timedelta(hours=24)).isoformat()
+            }).execute()
+        except Exception:
+            pass
+        warning_msg = "🚫 Warning 4 of 5. You are BANNED for 24 hours."
+    elif warnings >= 5:
+        updates["throttle_level"] = 5
+        # Permanent IP ban
+        try:
+            sb.table("bans").upsert({
+                "ip_address": get_ip(),
+                "reason": "Auto-ban: 5th spam warning",
+                "banned_by": None
+            }).execute()
+        except Exception:
+            pass
+        warning_msg = "🚫 Warning 5 of 5. Your IP is now PERMANENTLY BANNED. Goodbye."
+
+    # Persist changes
+    try:
+        sb.table("users").update(updates).eq("id", uid).execute()
+    except Exception:
+        pass
+
+    # Log event
+    try:
+        sb.table("spam_events").insert({
+            "user_id": uid,
+            "trigger_reason": reason,
+            "warning_number": warnings,
+            "ip_address": get_ip()
+        }).execute()
+    except Exception:
+        pass
+
+    delay = THROTTLE_DELAY_MS.get(updates.get("throttle_level", level), current_delay)
+    return delay, warning_msg
+
+
+# ============================================================
+#   BEFORE-REQUEST: IP BAN CHECK (with immunity bypass)
 # ============================================================
 @app.before_request
 def check_before_request():
-    # Whitelist paths — never blocked
     open_paths = ["/static", "/health", "/favicon.ico"]
     for p in open_paths:
         if request.path.startswith(p):
             return
 
-    # IP ban check
     ip = get_ip()
     if sb and ip and is_ip_banned(ip):
-        # CRITICAL: Owners and admins are never blocked by IP ban
+        # Owner / admin / immune bypass
         if "user_id" in session:
             try:
-                u = sb.table("users").select("is_owner,is_admin").eq("id", session["user_id"]).execute().data
-                if u and (u[0].get("is_owner") or u[0].get("is_admin")):
-                    return  # allow through
+                u = sb.table("users").select("*").eq("id", session["user_id"]).execute().data
+                if u:
+                    user = u[0]
+                    if user.get("is_owner") or user.get("is_admin") or is_immune(user):
+                        return
             except Exception:
                 pass
         return jsonify({"error": "Your IP is banned from this service.", "banned": True}), 403
@@ -207,7 +386,6 @@ def signup():
         password = data.get("password") or ""
         invite_code = (data.get("invite_code") or "").strip()
 
-        # Validation
         if len(username) < 3:
             return jsonify({"error": "Username must be at least 3 characters"}), 400
         if len(username) > 20:
@@ -217,13 +395,11 @@ def signup():
         if len(password) < 6:
             return jsonify({"error": "Password must be at least 6 characters"}), 400
 
-        # Check global settings
         settings_res = sb.table("admin_settings").select("*").eq("id", 1).execute().data
         settings = settings_res[0] if settings_res else {}
         if not settings.get("signups_enabled", True) and not invite_code:
             return jsonify({"error": "Signups are currently disabled. You need an invite code."}), 403
 
-        # Validate invite if provided
         invite = None
         if invite_code:
             inv_res = sb.table("invite_links").select("*").eq("code", invite_code).execute().data
@@ -239,25 +415,19 @@ def signup():
             if invite.get("max_uses") and invite.get("uses_count", 0) >= invite["max_uses"]:
                 return jsonify({"error": "This invite has reached its maximum uses"}), 400
 
-        # Uniqueness check
         exists = sb.table("users").select("id").eq("username", username).execute().data
         if exists:
             return jsonify({"error": "Username already taken"}), 400
 
-        # Hash password
         pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-        # First-ever user becomes owner
         user_count = sb.table("users").select("id", count="exact").execute().count or 0
         is_owner = (user_count == 0)
 
-        # Generate recovery phrase + key
         phrase = generate_recovery_phrase()
         phrase_hash = bcrypt.hashpw(phrase.encode(), bcrypt.gensalt()).decode()
         recovery_key = secrets.token_hex(48)
         key_hash = bcrypt.hashpw(recovery_key.encode(), bcrypt.gensalt()).decode()
 
-        # Insert user
         new_user = sb.table("users").insert({
             "username": username,
             "password_hash": pw_hash,
@@ -269,14 +439,12 @@ def signup():
             "theme_color": "#00d9ff"
         }).execute().data[0]
 
-        # Insert recovery key
         sb.table("recovery_keys").insert({
             "user_id": new_user["id"],
             "key_hash": key_hash,
             "method": "file"
         }).execute()
 
-        # Handle invite
         if invite:
             sb.table("invite_links").update({
                 "uses_count": invite.get("uses_count", 0) + 1
@@ -287,7 +455,6 @@ def signup():
                 "ip_address": get_ip()
             }).execute()
 
-        # Log in
         session.permanent = True
         session["user_id"] = new_user["id"]
 
@@ -323,32 +490,30 @@ def login():
             return jsonify({"error": "Invalid username or password"}), 400
         user = res[0]
 
-        if user.get("suspended"):
+        if user.get("suspended") and not is_immune(user):
             return jsonify({"error": "This account has been suspended"}), 403
 
-        # Check active ban punishment
-        try:
-            pun = sb.table("user_punishments").select("*").eq("user_id", user["id"]).eq("active", True).eq("type", "ban").execute().data
-            if pun:
-                # Check if expired
-                p = pun[0]
-                still_active = True
-                if p.get("expires_at"):
-                    exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
-                    if exp < datetime.now(timezone.utc):
-                        sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
-                        still_active = False
-                if still_active:
-                    reason = p.get("reason") or "No reason given"
-                    return jsonify({"error": f"Account banned: {reason}"}), 403
-        except Exception:
-            pass
+        # Active ban punishment (immune users bypass)
+        if not is_immune(user):
+            try:
+                pun = sb.table("user_punishments").select("*").eq("user_id", user["id"]).eq("active", True).eq("type", "ban").execute().data
+                if pun:
+                    p = pun[0]
+                    still_active = True
+                    if p.get("expires_at"):
+                        exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
+                        if exp < datetime.now(timezone.utc):
+                            sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
+                            still_active = False
+                    if still_active:
+                        reason = p.get("reason") or "No reason given"
+                        return jsonify({"error": f"Account banned: {reason}"}), 403
+            except Exception:
+                pass
 
-        # Verify password
         if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
             return jsonify({"error": "Invalid username or password"}), 400
 
-        # 2FA check
         if user.get("totp_enabled") and user.get("totp_secret"):
             if not totp_code:
                 return jsonify({"needs_2fa": True}), 200
@@ -356,7 +521,6 @@ def login():
             if not totp.verify(totp_code, valid_window=1):
                 return jsonify({"error": "Invalid 2FA code", "needs_2fa": True}), 400
 
-        # Update last seen
         sb.table("users").update({
             "last_ip": get_ip(),
             "last_seen": now_iso()
@@ -389,7 +553,7 @@ def logout():
 def me():
     u = current_user()
     if not u:
-        return jsonify({"user": None})
+        return jsonify({"user": None, "poll_config": POLL_CONFIG})
     return jsonify({
         "user": {
             "id": u["id"],
@@ -401,8 +565,10 @@ def me():
             "nickname_color": u.get("nickname_color") or "#00d9ff",
             "theme_color": u.get("theme_color") or "#00d9ff",
             "anonymous_mode": u.get("anonymous_mode", False),
-            "totp_enabled": u.get("totp_enabled", False)
-        }
+            "totp_enabled": u.get("totp_enabled", False),
+            "is_immune": is_immune(u)
+        },
+        "poll_config": POLL_CONFIG
     })
 
 
@@ -525,7 +691,6 @@ def change_password():
 @app.route("/api/delete_account", methods=["POST"])
 @login_required
 def delete_account():
-    """Fully delete user account. Requires typing DELETE to confirm."""
     try:
         data = request.json or {}
         if data.get("confirm") != "DELETE":
@@ -533,23 +698,18 @@ def delete_account():
 
         uid = session["user_id"]
 
-        # Mark messages as deleted (keep for others in conversation)
         sb.table("messages").update({
             "deleted": True,
             "content": "[deleted]",
             "image_url": None
         }).eq("sender_id", uid).execute()
 
-        # Remove from conversations
         sb.table("conversation_members").delete().eq("user_id", uid).execute()
-
-        # Delete related data
         sb.table("recovery_keys").delete().eq("user_id", uid).execute()
         sb.table("message_reactions").delete().eq("user_id", uid).execute()
         sb.table("message_reads").delete().eq("user_id", uid).execute()
         sb.table("typing_status").delete().eq("user_id", uid).execute()
-
-        # Delete user
+        sb.table("recent_messages").delete().eq("user_id", uid).execute()
         sb.table("users").delete().eq("id", uid).execute()
 
         session.clear()
@@ -559,22 +719,19 @@ def delete_account():
 
 
 # ============================================================
-#   2FA SETUP
+#   2FA
 # ============================================================
 @app.route("/api/2fa/setup", methods=["POST"])
 @login_required
 def setup_2fa():
-    """Generate a new TOTP secret + QR code."""
     try:
         u = current_user()
         secret = pyotp.random_base32()
-        # Store TEMPORARILY in session, only save to DB when confirmed
         session["pending_totp_secret"] = secret
 
         totp = pyotp.TOTP(secret)
         uri = totp.provisioning_uri(name=u["username"], issuer_name="Cipher")
 
-        # Generate QR code as base64 PNG
         qr = qrcode.QRCode(box_size=8, border=2)
         qr.add_data(uri)
         qr.make(fit=True)
@@ -595,7 +752,6 @@ def setup_2fa():
 @app.route("/api/2fa/enable", methods=["POST"])
 @login_required
 def enable_2fa():
-    """Confirm 2FA setup by verifying a code."""
     try:
         data = request.json or {}
         code = (data.get("code") or "").strip()
@@ -620,7 +776,6 @@ def enable_2fa():
 @app.route("/api/2fa/disable", methods=["POST"])
 @login_required
 def disable_2fa():
-    """Disable 2FA (requires current password for security)."""
     try:
         data = request.json or {}
         password = data.get("password") or ""
@@ -669,7 +824,6 @@ def list_conversations():
                 c["muted"] = muted_map.get(c["id"], False)
                 c["i_am_group_admin"] = gadmin_map.get(c["id"], False)
 
-                # Last message preview
                 last = sb.table("messages").select("content,created_at,image_url").eq("conversation_id", c["id"]).eq("deleted", False).order("created_at", desc=True).limit(1).execute().data
                 if last:
                     preview = last[0].get("content", "") or ("📷 Image" if last[0].get("image_url") else "")
@@ -693,7 +847,6 @@ def list_conversations():
 @app.route("/api/conversations/new_dm", methods=["POST"])
 @login_required
 def new_dm():
-    """Create or open a 1-on-1 conversation."""
     try:
         data = request.json or {}
         other_username = (data.get("username") or "").strip().lower()
@@ -706,7 +859,6 @@ def new_dm():
         if other_id == uid:
             return jsonify({"error": "You cannot chat with yourself"}), 400
 
-        # Check for existing DM
         my_convs = sb.table("conversation_members").select("conversation_id").eq("user_id", uid).execute().data
         their_convs = sb.table("conversation_members").select("conversation_id").eq("user_id", other_id).execute().data
         shared = {c["conversation_id"] for c in my_convs} & {c["conversation_id"] for c in their_convs}
@@ -734,7 +886,6 @@ def new_dm():
 @app.route("/api/conversations/new_group", methods=["POST"])
 @login_required
 def new_group():
-    """Create a group chat with multiple users."""
     try:
         data = request.json or {}
         name = (data.get("name") or "").strip()
@@ -758,7 +909,6 @@ def new_group():
         if not user_ids:
             return jsonify({"error": "No valid users found"}), 400
 
-        # Add creator as admin
         conv = sb.table("conversations").insert({
             "created_by": uid,
             "is_group": True,
@@ -783,14 +933,12 @@ def add_group_member(cid):
     try:
         uid = session["user_id"]
         username = ((request.json or {}).get("username") or "").strip().lower()
-        # Must be group admin
         mem = sb.table("conversation_members").select("is_group_admin").eq("conversation_id", cid).eq("user_id", uid).execute().data
         if not mem or not mem[0].get("is_group_admin"):
             return jsonify({"error": "Only group admins can add members"}), 403
         target = sb.table("users").select("id").eq("username", username).execute().data
         if not target:
             return jsonify({"error": "User not found"}), 404
-        # Check not already member
         existing = sb.table("conversation_members").select("id").eq("conversation_id", cid).eq("user_id", target[0]["id"]).execute().data
         if existing:
             return jsonify({"error": "User already in group"}), 400
@@ -937,7 +1085,6 @@ def get_messages(cid):
             except Exception:
                 pass
 
-        # Also compute warnings for messages expiring in <48h
         soon = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
         expiring_soon = 0
 
@@ -947,7 +1094,6 @@ def get_messages(cid):
             if msg.get("expires_at") and msg["expires_at"] < soon:
                 expiring_soon += 1
 
-        # Auto-mark as read
         for msg in msgs:
             if msg["sender_id"] != uid:
                 try:
@@ -975,23 +1121,24 @@ def send_message(cid):
         if not user:
             return jsonify({"error": "Session expired"}), 401
 
-        if not user.get("can_send_messages", True):
+        if not user.get("can_send_messages", True) and not is_immune(user):
             return jsonify({"error": "You are not allowed to send messages"}), 403
 
-        # Active mute?
-        try:
-            pun = sb.table("user_punishments").select("*").eq("user_id", uid).eq("active", True).eq("type", "mute").execute().data
-            for p in pun:
-                still_active = True
-                if p.get("expires_at"):
-                    exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
-                    if exp < datetime.now(timezone.utc):
-                        sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
-                        still_active = False
-                if still_active:
-                    return jsonify({"error": f"You are muted: {p.get('reason','no reason')}"}), 403
-        except Exception:
-            pass
+        # Active mute (immune users bypass)
+        if not is_immune(user):
+            try:
+                pun = sb.table("user_punishments").select("*").eq("user_id", uid).eq("active", True).eq("type", "mute").execute().data
+                for p in pun:
+                    still_active = True
+                    if p.get("expires_at"):
+                        exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
+                        if exp < datetime.now(timezone.utc):
+                            sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
+                            still_active = False
+                    if still_active:
+                        return jsonify({"error": f"You are muted: {p.get('reason','no reason')}"}), 403
+            except Exception:
+                pass
 
         m = sb.table("conversation_members").select("id").eq("conversation_id", cid).eq("user_id", uid).execute().data
         if not m:
@@ -1003,6 +1150,21 @@ def send_message(cid):
 
         if not content and not image_data:
             return jsonify({"error": "Empty message"}), 400
+
+        # === ANTI-SPAM CHECK ===
+        throttle_delay, warning = check_spam(user, content)
+
+        # If they just got a level 4 or 5 warning, block this message
+        # Re-fetch user in case check_spam updated throttle_level
+        try:
+            fresh = sb.table("users").select("throttle_level").eq("id", uid).execute().data
+            if fresh and fresh[0].get("throttle_level", 0) >= 4:
+                return jsonify({
+                    "error": warning or "Your account has been restricted.",
+                    "blocked": True
+                }), 403
+        except Exception:
+            pass
 
         image_url = None
         if image_data:
@@ -1021,7 +1183,6 @@ def send_message(cid):
             except Exception as e:
                 return jsonify({"error": f"Image upload failed: {str(e)}"}), 500
 
-        # Determine expiry
         conv = sb.table("conversations").select("keep_forever").eq("id", cid).execute().data
         settings = sb.table("admin_settings").select("default_retention_days").eq("id", 1).execute().data
         keep = conv[0].get("keep_forever", False) if conv else False
@@ -1044,7 +1205,13 @@ def send_message(cid):
         }).execute().data[0]
 
         sb.table("conversations").update({"updated_at": now_iso()}).eq("id", cid).execute()
-        return jsonify({"ok": True, "message": msg})
+
+        response = {"ok": True, "message": msg}
+        if warning:
+            response["warning"] = warning
+        if throttle_delay > 0:
+            response["throttle_delay"] = throttle_delay
+        return jsonify(response)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1088,7 +1255,6 @@ def extend_message(msg_id):
 @app.route("/api/conversations/<cid>/extend_all", methods=["POST"])
 @login_required
 def extend_all(cid):
-    """Extend all expiring-soon messages in this conversation by 30 days."""
     try:
         uid = session["user_id"]
         m = sb.table("conversation_members").select("id").eq("conversation_id", cid).eq("user_id", uid).execute().data
@@ -1100,7 +1266,6 @@ def extend_all(cid):
             "expires_at": new_exp,
             "warning_sent": False
         }).eq("conversation_id", cid).lt("expires_at", soon).execute()
-        # Mark the warning dismissed
         try:
             sb.table("message_warnings").upsert({
                 "user_id": uid,
@@ -1188,12 +1353,12 @@ def create_invite():
     try:
         user = current_user()
         settings = sb.table("admin_settings").select("*").eq("id", 1).execute().data[0]
-        if not settings.get("invites_enabled", True):
+        if not settings.get("invites_enabled", True) and not is_immune(user):
             return jsonify({"error": "Invites are currently disabled"}), 403
         mode = settings.get("invite_creation_mode", "everyone")
         if mode == "admins_only" and not (user.get("is_admin") or user.get("is_owner")):
             return jsonify({"error": "Only admins can create invites"}), 403
-        if not user.get("can_create_invites", True):
+        if not user.get("can_create_invites", True) and not is_immune(user):
             return jsonify({"error": "You cannot create invites"}), 403
 
         data = request.json or {}
@@ -1313,7 +1478,15 @@ def admin_stats():
 @admin_required
 def admin_users():
     try:
-        users = sb.table("users").select("id,username,is_admin,is_owner,suspended,can_create_invites,can_send_messages,keep_all_forever,last_ip,created_at,last_seen,nickname_color,totp_enabled").order("created_at").execute().data
+        users = sb.table("users").select("id,username,is_admin,is_owner,suspended,can_create_invites,can_send_messages,keep_all_forever,last_ip,created_at,last_seen,nickname_color,totp_enabled,spam_warnings,throttle_level").order("created_at").execute().data
+        # Mark immune status
+        try:
+            imm = sb.table("immunity_list").select("username").execute().data
+            immune_set = {i["username"] for i in imm}
+        except Exception:
+            immune_set = set()
+        for u in users:
+            u["is_immune"] = u.get("is_owner", False) or u["username"] in immune_set
         return jsonify({"users": users})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1323,6 +1496,12 @@ def admin_users():
 @admin_required
 def admin_update_user(uid):
     try:
+        # Block updates to immune users (except by owner)
+        me = current_user()
+        target = sb.table("users").select("*").eq("id", uid).execute().data
+        if target and is_immune(target[0]) and not me.get("is_owner"):
+            return jsonify({"error": "This user is immune and cannot be modified"}), 403
+
         data = request.json or {}
         allowed = ["is_admin", "suspended", "can_create_invites", "can_send_messages",
                    "can_upload_files", "keep_all_forever"]
@@ -1339,6 +1518,10 @@ def admin_update_user(uid):
 @admin_required
 def admin_reset_password(uid):
     try:
+        me = current_user()
+        target = sb.table("users").select("*").eq("id", uid).execute().data
+        if target and is_immune(target[0]) and not me.get("is_owner"):
+            return jsonify({"error": "This user is immune"}), 403
         new_pass = secrets.token_urlsafe(10)
         new_hash = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt()).decode()
         sb.table("users").update({"password_hash": new_hash}).eq("id", uid).execute()
@@ -1352,6 +1535,10 @@ def admin_reset_password(uid):
 @admin_required
 def admin_punish(uid):
     try:
+        me = current_user()
+        target = sb.table("users").select("*").eq("id", uid).execute().data
+        if target and is_immune(target[0]):
+            return jsonify({"error": "This user is immune to punishments"}), 403
         data = request.json or {}
         ptype = data.get("type")
         reason = (data.get("reason") or "").strip()
@@ -1407,6 +1594,16 @@ def admin_ban():
         reason = (data.get("reason") or "").strip()
         if not ip:
             return jsonify({"error": "IP address required"}), 400
+
+        # Check if this IP belongs to an immune user
+        try:
+            users_at_ip = sb.table("users").select("*").eq("last_ip", ip).execute().data
+            for u in users_at_ip:
+                if is_immune(u):
+                    return jsonify({"error": f"Cannot ban this IP — belongs to immune user @{u['username']}"}), 403
+        except Exception:
+            pass
+
         sb.table("bans").upsert({
             "ip_address": ip,
             "reason": reason,
@@ -1472,12 +1669,21 @@ def get_audit_log():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/admin/spam_events")
+@admin_required
+def admin_spam_events():
+    try:
+        events = sb.table("spam_events").select("*,users(username)").order("created_at", desc=True).limit(100).execute().data
+        return jsonify({"events": events})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/admin/conversations")
 @admin_required
 def admin_conversations():
     try:
         convs = sb.table("conversations").select("*").order("updated_at", desc=True).limit(100).execute().data
-        # Attach member usernames
         for c in convs:
             try:
                 members = sb.table("conversation_members").select("users(username)").eq("conversation_id", c["id"]).execute().data
@@ -1507,19 +1713,17 @@ def admin_keep_conv(cid):
 #   BACKGROUND CLEANUP SCHEDULER
 # ============================================================
 def cleanup_task():
-    """Runs hourly. Cleans up expired data."""
     if not sb:
         return
     try:
         now = now_iso()
-        # Soft-delete expired messages
         sb.table("messages").update({"deleted": True}).lt("expires_at", now).eq("deleted", False).execute()
-        # Deactivate expired punishments
         sb.table("user_punishments").update({"active": False}).lt("expires_at", now).eq("active", True).execute()
-        # Purge stale typing rows
         stale = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
         sb.table("typing_status").delete().lt("started_at", stale).execute()
-        # Purge expired bans
+        # Clean old recent_messages (keep last 60s for spam detection)
+        old_rm = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        sb.table("recent_messages").delete().lt("created_at", old_rm).execute()
         sb.table("bans").delete().lt("expires_at", now).execute()
         print(f"[cleanup] Ran at {now}")
     except Exception as e:
@@ -1527,7 +1731,7 @@ def cleanup_task():
 
 
 scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(cleanup_task, "interval", minutes=30, next_run_time=datetime.now())
+scheduler.add_job(cleanup_task, "interval", minutes=15, next_run_time=datetime.now())
 scheduler.start()
 
 
