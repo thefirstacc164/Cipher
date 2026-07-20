@@ -1,6 +1,9 @@
-flask==3.0.3
+Flask==3.0.3
 gunicorn==21.2.0
 supabase==2.7.4
 bcrypt==4.2.0
+pyotp==2.9.0
+qrcode[pil]==7.4.2
+Pillow==10.4.0
+APScheduler==3.10.4
 python-dotenv==1.0.1
-apscheduler==3.10.4
