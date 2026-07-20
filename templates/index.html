@@ -3,16 +3,26 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cipher — Private Messaging</title>
+<title>Cipher — Private Messaging (BETA)</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
+<!-- BETA CORNER RIBBON (always visible) -->
+<div class="beta-ribbon">
+  <span class="beta-en">BETA</span>
+  <span class="beta-ru">БЕТА</span>
+</div>
+
 <!-- AUTH SCREEN -->
 <div id="auth-screen" class="screen">
   <div class="auth-box">
-    <h1 class="logo">CIPHER</h1>
+    <div class="logo-wrap">
+      <h1 class="logo">CIPHER</h1>
+      <span class="beta-badge">BETA v0.1.0</span>
+    </div>
     <p class="tagline">Messages that don't stay forever.</p>
+    <p class="nadpis">надпись: закрытая бета · private beta</p>
     <div class="tabs">
       <button class="tab active" data-tab="login">Log in</button>
       <button class="tab" data-tab="signup">Sign up</button>
@@ -24,6 +34,11 @@
       <button type="submit" id="auth-submit">Log in</button>
       <p id="auth-error" class="error"></p>
     </form>
+    <div class="auth-footer">
+      <button class="link-btn" onclick="showCredits()">Credits</button>
+      <span class="dot">·</span>
+      <span class="author-tag">by <b>Stepundrik</b></span>
+    </div>
   </div>
 </div>
 
@@ -31,7 +46,7 @@
 <div id="app-screen" class="screen hidden">
   <aside class="sidebar">
     <div class="sidebar-header">
-      <h2>CIPHER</h2>
+      <h2>CIPHER <span class="beta-mini">BETA</span></h2>
       <div class="user-tag">
         <span id="my-username">?</span>
         <button id="logout-btn" title="Log out">⏻</button>
@@ -41,6 +56,10 @@
     <button id="invites-btn" class="secondary-btn">🎟️ Invites</button>
     <button id="admin-btn" class="secondary-btn hidden">⚙️ Admin</button>
     <div id="conv-list" class="conv-list"></div>
+    <div class="sidebar-footer">
+      <button class="link-btn" onclick="showCredits()">Credits</button>
+      <span class="version-tag">v0.1.0 · БЕТА</span>
+    </div>
   </aside>
 
   <main class="main">
