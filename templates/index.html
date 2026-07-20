@@ -8,18 +8,21 @@
 </head>
 <body>
 
-<!-- BETA CORNER RIBBON (always visible) -->
+<!-- BETA RIBBON -->
 <div class="beta-ribbon">
   <span class="beta-en">BETA</span>
   <span class="beta-ru">БЕТА</span>
 </div>
+
+<!-- ANNOUNCEMENT BANNER (dynamic) -->
+<div id="announcement-bar" class="announcement-bar hidden"></div>
 
 <!-- AUTH SCREEN -->
 <div id="auth-screen" class="screen">
   <div class="auth-box">
     <div class="logo-wrap">
       <h1 class="logo">CIPHER</h1>
-      <span class="beta-badge">BETA v0.1.0</span>
+      <span class="beta-badge">BETA v0.2.0</span>
     </div>
     <p class="tagline">Messages that don't stay forever.</p>
     <p class="nadpis">надпись: закрытая бета · private beta</p>
@@ -35,6 +38,8 @@
       <p id="auth-error" class="error"></p>
     </form>
     <div class="auth-footer">
+      <button class="link-btn" onclick="showRecover()">Forgot password?</button>
+      <span class="dot">·</span>
       <button class="link-btn" onclick="showCredits()">Credits</button>
       <span class="dot">·</span>
       <span class="author-tag">by <b>Stepundrik</b></span>
@@ -53,28 +58,42 @@
       </div>
     </div>
     <button id="new-chat-btn" class="primary-btn">+ New Chat</button>
-    <button id="invites-btn" class="secondary-btn">🎟️ Invites</button>
-    <button id="admin-btn" class="secondary-btn hidden">⚙️ Admin</button>
+    <div class="btn-row">
+      <button id="search-btn" class="secondary-btn" title="Search">🔍</button>
+      <button id="invites-btn" class="secondary-btn" title="Invites">🎟️</button>
+      <button id="settings-btn" class="secondary-btn" title="Settings">⚙️</button>
+      <button id="admin-btn" class="secondary-btn hidden" title="Admin">👑</button>
+    </div>
     <div id="conv-list" class="conv-list"></div>
     <div class="sidebar-footer">
       <button class="link-btn" onclick="showCredits()">Credits</button>
-      <span class="version-tag">v0.1.0 · БЕТА</span>
+      <span class="version-tag">v0.2.0 · БЕТА</span>
     </div>
   </aside>
 
   <main class="main">
     <div id="empty-state" class="empty-state">
+      <div class="empty-logo">CIPHER</div>
       <p>Select a conversation or start a new one.</p>
     </div>
     <div id="chat-view" class="chat-view hidden">
       <div class="chat-header">
         <h3 id="chat-title">Chat</h3>
+        <div class="chat-actions">
+          <button class="mini-btn" onclick="muteCurrent()" id="mute-btn">🔔</button>
+          <button class="mini-btn" onclick="exportCurrent()">📥</button>
+          <button class="mini-btn danger" onclick="leaveCurrent()">🚪</button>
+        </div>
       </div>
+      <div id="typing-indicator" class="typing-indicator hidden"></div>
       <div id="messages" class="messages"></div>
       <form id="msg-form" class="msg-form">
+        <button type="button" class="icon-btn" onclick="document.getElementById('img-input').click()" title="Send image">📷</button>
+        <input type="file" id="img-input" accept="image/*" style="display:none" onchange="handleImageSelect(event)">
         <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
         <button type="submit">Send</button>
       </form>
+      <div id="image-preview" class="image-preview hidden"></div>
     </div>
   </main>
 </div>
@@ -85,6 +104,11 @@
     <button class="modal-close" onclick="closeModal()">×</button>
     <div id="modal-content"></div>
   </div>
+</div>
+
+<!-- IMAGE VIEWER -->
+<div id="img-viewer" class="img-viewer hidden" onclick="this.classList.add('hidden')">
+  <img id="img-viewer-img" src="" alt="">
 </div>
 
 <script src="/static/app.js"></script>
