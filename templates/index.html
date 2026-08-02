@@ -49,6 +49,16 @@
           <label>Invite code <span class="opt">(optional)</span></label>
           <input type="text" id="auth-invite" placeholder="Paste invite code">
         </div>
+        <div class="field hidden" id="affiliate-field">
+          <label>Affiliate code <span class="opt">(optional)</span></label>
+          <input type="text" id="auth-affiliate" placeholder="Referral code">
+        </div>
+        <div class="field hidden" id="tos-field">
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="tos-checkbox" required>
+            <span>I have read and accept the <a href="#" onclick="showToSModal(); return false;" class="link">Terms of Service</a></span>
+          </label>
+        </div>
         <div class="field hidden" id="totp-field">
           <label>2FA code</label>
           <input type="text" id="auth-totp" placeholder="6-digit code from your app" maxlength="6" inputmode="numeric">
@@ -216,5 +226,5 @@
 <div id="toast-container" class="toast-container"></div>
 
 <script src="/static/app.js"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a25097a66b425b53',t:'MTc4NTcxMDUxMQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
