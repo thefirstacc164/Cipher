@@ -5,6 +5,7 @@
 
 // ==========  STATE  ==========
 let currentUser = null;
+let currentUserShards = 0;
 let currentConv = null;
 let currentConvMeta = null;
 let pollTimer = null;
@@ -131,6 +132,10 @@ function initAuthTabs() {
       tab.classList.add('active');
       const isSignup = tab.dataset.tab === 'signup';
       document.getElementById('invite-field').classList.toggle('hidden', !isSignup);
+    const affiliateField = document.getElementById('affiliate-field');
+    if (affiliateField) affiliateField.classList.toggle('hidden', !isSignup);
+    const tosField = document.getElementById('tos-field');
+    if (tosField) tosField.classList.toggle('hidden', !isSignup);
       document.getElementById('totp-field').classList.add('hidden');
       document.getElementById('auth-submit').textContent = isSignup ? 'Create account' : 'Sign in';
       document.getElementById('auth-error').textContent = '';
@@ -379,18 +384,38 @@ async function doRecover(method) {
 
 // ==========  CREDITS MODAL  ==========
 function showCreditsModal() {
+  const color = currentUser?.theme_color || '#00d9ff';
+  const colorName = getColorName(color);
   showModal(`
     <div class="credits-box">
       <div class="credits-logo">CIPHER</div>
-      <div class="credits-version">v1.0.0</div>
+      <div class="credits-version">v1.1.0</div>
       <div class="credits-line">— A solo project by —</div>
       <div class="credits-name">STEPUNDRIK</div>
       <div class="credits-roles">Backend · Frontend · Design<br>Database · Deployment</div>
-      <div class="credits-line">Private messaging that doesn't stay forever.</div>
+      <div class="credits-line">Made with love and too much ${colorName}.</div>
       <div class="credits-heart">Built with care.</div>
-      <div class="credits-copy">© 2025 · All rights reserved</div>
+      <div class="credits-copy">© 2026 · All rights reserved</div>
     </div>
   `);
+}
+
+function getColorName(hex) {
+  const map = {
+    "#00d9ff": "cyan", "#ef4444": "red", "#f59e0b": "orange", "#eab308": "yellow",
+    "#22c55e": "green", "#3b82f6": "blue", "#8b5cf6": "purple", "#ec4899": "pink",
+    "#f43f5e": "rose", "#ffffff": "white", "#000000": "black", "#6b7280": "gray",
+    "#6366f1": "indigo", "#14b8a6": "teal", "#f97316": "orange"
+  };
+  let closest = "cyan", minDist = Infinity;
+  for (const [c, name] of Object.entries(map)) {
+    const dr = parseInt(c.slice(1,3),16) - parseInt(hex.slice(1,3),16);
+    const dg = parseInt(c.slice(3,5),16) - parseInt(hex.slice(3,5),16);
+    const db = parseInt(c.slice(5,7),16) - parseInt(hex.slice(5,7),16);
+    const dist = dr*dr + dg*dg + db*db;
+    if (dist < minDist) { minDist = dist; closest = name; }
+  }
+  return closest;
 }
 
 // ==========  SESSION + ENTER APP  ==========
@@ -1707,3 +1732,4 @@ checkSession();
 
 // Refresh announcements periodically
 setInterval(loadAnnouncements, 60000);
+ents, 60000);
