@@ -158,13 +158,16 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
   errBox.className = 'form-msg';
 
   const isSignup = document.querySelector('.auth-card .tab.active').dataset.tab === 'signup';
-  const body = {
+    const body = {
     username: document.getElementById('auth-username').value.trim(),
     password: document.getElementById('auth-password').value
   };
   if (isSignup) {
     const inv = document.getElementById('auth-invite').value.trim();
     if (inv) body.invite_code = inv;
+    const affiliate = document.getElementById('auth-affiliate')?.value.trim();
+    if (affiliate) body.affiliate_code = affiliate;
+    body.tos_accepted = document.getElementById('tos-checkbox')?.checked || false;
   } else {
     const totp = document.getElementById('auth-totp').value.trim();
     if (totp) body.totp = totp;
