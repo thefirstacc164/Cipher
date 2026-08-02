@@ -17,7 +17,7 @@
   <div class="glow g2"></div>
 </div>
 
-<!-- Announcement banner (populated by JS) -->
+<!-- Announcement banner -->
 <div id="announcement-bar" class="announcement-bar hidden"></div>
 
 <!-- ============================================
@@ -51,17 +51,17 @@
         </div>
         <div class="field hidden" id="affiliate-field">
           <label>Affiliate code <span class="opt">(optional)</span></label>
-          <input type="text" id="auth-affiliate" placeholder="Referral code">
-        </div>
-        <div class="field hidden" id="tos-field">
-          <label style="display:flex; align-items:center; gap:8px;">
-            <input type="checkbox" id="tos-checkbox" required>
-            <span>I have read and accept the <a href="#" onclick="showToSModal(); return false;" class="link">Terms of Service</a></span>
-          </label>
+          <input type="text" id="auth-affiliate" placeholder="Friend's affiliate code">
         </div>
         <div class="field hidden" id="totp-field">
           <label>2FA code</label>
           <input type="text" id="auth-totp" placeholder="6-digit code from your app" maxlength="6" inputmode="numeric">
+        </div>
+        <div class="field hidden" id="tos-field">
+          <label class="checkbox-label">
+            <input type="checkbox" id="auth-tos-check">
+            <span>I have read and accept the <button type="button" class="link inline-link" onclick="showTosModal()">Terms of Service</button></span>
+          </label>
         </div>
         <button type="submit" id="auth-submit" class="btn primary lg">Sign in</button>
         <p id="auth-error" class="form-msg"></p>
@@ -70,11 +70,13 @@
       <div class="auth-footer">
         <button class="link" type="button" onclick="showRecoverModal()">Forgot password?</button>
         <span class="sep">•</span>
+        <button class="link" type="button" onclick="showTosModal()">Terms</button>
+        <span class="sep">•</span>
         <button class="link" type="button" onclick="showCreditsModal()">About</button>
       </div>
     </div>
 
-      <div class="auth-meta">
+    <div class="auth-meta">
       <span>v1.1.0</span>
       <span class="sep">•</span>
       <span>Built by <b>Stepundrik</b></span>
@@ -105,6 +107,13 @@
       </div>
     </div>
 
+    <!-- Shards balance -->
+    <div class="shards-display" id="shards-display" onclick="showShardsModal()" title="Your Shards balance">
+      <span class="shards-icon">💎</span>
+      <span class="shards-count" id="shards-count">0</span>
+      <span class="shards-label">Shards</span>
+    </div>
+
     <button id="new-chat-btn" class="btn primary with-icon" type="button">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       New chat
@@ -125,6 +134,21 @@
       </button>
       <button id="admin-btn" class="tool hidden" title="Admin" type="button">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z"/></svg>
+      </button>
+    </div>
+
+    <div class="tool-row">
+      <button id="shop-btn" class="tool" title="Shop" type="button">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+      </button>
+      <button id="affiliate-btn" class="tool" title="Affiliate program" type="button">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+      </button>
+      <button id="leaderboard-btn" class="tool" title="Leaderboard" type="button">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+      </button>
+      <button id="profile-btn" class="tool" title="My profile" type="button">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
       </button>
     </div>
 
@@ -172,7 +196,7 @@
         </div>
       </header>
 
-      <!-- Expiry warning banner (48h) -->
+      <!-- Expiry warning banner -->
       <div id="expiry-warning" class="expiry-warning hidden">
         <div class="warn-content">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -220,6 +244,14 @@
 <!-- Image fullscreen viewer -->
 <div id="img-viewer" class="img-viewer hidden" onclick="this.classList.add('hidden')">
   <img id="img-viewer-img" src="" alt="">
+</div>
+
+<!-- Profile card popup -->
+<div id="profile-card-bg" class="profile-card-bg hidden" onclick="if(event.target.id==='profile-card-bg') closeProfileCard()">
+  <div id="profile-card" class="profile-card">
+    <button class="modal-close" onclick="closeProfileCard()" type="button">×</button>
+    <div id="profile-card-content"></div>
+  </div>
 </div>
 
 <!-- Toast notifications container -->
