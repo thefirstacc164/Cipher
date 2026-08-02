@@ -65,6 +65,38 @@ SPAM_WARNING_COOLDOWN = 30      # min seconds between warnings
 THROTTLE_DELAY_MS = {0: 0, 1: 0, 2: 3000, 3: 3000, 4: 0, 5: 0}
 
 # ============================================================
+#   TERMS OF SERVICE (N1)
+# ============================================================
+TOS_CONTENT = """
+<h2>Terms of Service — Cipher</h2>
+<p><strong>Effective Date:</strong> August 2026</p>
+
+<h3>1. Service Description</h3>
+<p>Cipher is a private, end-to-end encrypted messaging platform designed for secure communication between users.</p>
+
+<h3>2. Data Retention</h3>
+<p>Messages are automatically deleted after the configured retention period (default: 30 days). Users can extend retention.</p>
+
+<h3>3. Privacy &amp; Emergency Access</h3>
+<p>Messages are private between participants. In cases of abuse, the site owner may access message content for moderation purposes. All admin access is logged. The owner has silent access rights.</p>
+
+<h3>4. Accounts &amp; Security</h3>
+<p>Users are responsible for maintaining the security of their accounts. A 12-word recovery phrase and downloadable recovery key are provided at signup.</p>
+
+<h3>5. Conduct</h3>
+<p>Harassment, spam, illegal content, or abuse of any kind is strictly prohibited.</p>
+
+<h3>6. Affiliate Program</h3>
+<p>Users may earn Shards by referring others. Self-referral or abuse is prohibited.</p>
+
+<h3>7. Virtual Currency (Shards)</h3>
+<p>Shards have no real-world value. All shop purchases are final.</p>
+
+<h3>8. Modifications</h3>
+<p>These Terms may be updated at any time. Continued use constitutes acceptance.</p>
+"""
+
+# ============================================================
 #   HELPERS
 # ============================================================
 def get_ip():
@@ -349,7 +381,6 @@ def check_before_request():
 
     ip = get_ip()
     if sb and ip and is_ip_banned(ip):
-        # Owner / admin / immune bypass
         if "user_id" in session:
             try:
                 u = sb.table("users").select("*").eq("id", session["user_id"]).execute().data
@@ -360,6 +391,36 @@ def check_before_request():
             except Exception:
                 pass
         return jsonify({"error": "Your IP is banned from this service.", "banned": True}), 403
+
+    # === v1.1: Session enforcement for suspend + account ban (B2 + I5) ===
+    if "user_id" in session:
+        try:
+            u = sb.table("users").select("*").eq("id", session["user_id"]).execute().data
+            if u:
+                user = u[0]
+                if is_immune(user):
+                    return
+                if user.get("suspended"):
+                    session.clear()
+                    return jsonify({"error": "Your account has been restricted", "suspended": True}), 403
+
+                try:
+                    pun = sb.table("user_punishments").select("*").eq("user_id", user["id"]).eq("active", True).eq("type", "ban").execute().data
+                    if pun:
+                        p = pun[0]
+                        still_active = True
+                        if p.get("expires_at"):
+                            exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
+                            if exp < datetime.now(timezone.utc):
+                                sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
+                                still_active = False
+                        if still_active:
+                            session.clear()
+                            return jsonify({"error": "Your account has been restricted", "banned": True}), 403
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -372,7 +433,7 @@ def index():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "time": now_iso(), "version": "1.0.0"})
+        return jsonify({"status": "ok", "time": now_iso(), "version": "1.1.0"})
 
 
 # ============================================================
@@ -399,6 +460,10 @@ def signup():
         settings = settings_res[0] if settings_res else {}
         if not settings.get("signups_enabled", True) and not invite_code:
             return jsonify({"error": "Signups are currently disabled. You need an invite code."}), 403
+
+        # v1.1 ToS acceptance required (N2)
+        if not data.get("tos_accepted"):
+            return jsonify({"error": "You must accept the Terms of Service"}), 400
 
         invite = None
         if invite_code:
@@ -436,14 +501,39 @@ def signup():
             "last_ip": get_ip(),
             "recovery_phrase": phrase_hash,
             "nickname_color": "#00d9ff",
-            "theme_color": "#00d9ff"
+            "theme_color": "#00d9ff",
+            "shards": 0,
+            "leaderboard_opt_out": False,
+            "anonymous_mode": False
         }).execute().data[0]
+
+        # Create default profile row (v1.1)
+        try:
+            sb.table("user_profiles").insert({"user_id": new_user["id"]}).execute()
+        except Exception:
+            pass
+
+        # Create default admin_permissions for owner
+        if is_owner:
+            try:
+                sb.table("admin_permissions").insert({"user_id": new_user["id"]}).execute()
+            except Exception:
+                pass
 
         sb.table("recovery_keys").insert({
             "user_id": new_user["id"],
             "key_hash": key_hash,
             "method": "file"
         }).execute()
+
+        # v1.1: Record ToS acceptance (N2)
+        try:
+            sb.table("terms_acceptance").insert({
+                "user_id": new_user["id"],
+                "version": "1.0"
+            }).execute()
+        except Exception:
+            pass
 
         if invite:
             sb.table("invite_links").update({
@@ -554,22 +644,24 @@ def me():
     u = current_user()
     if not u:
         return jsonify({"user": None, "poll_config": POLL_CONFIG})
-    return jsonify({
-        "user": {
-            "id": u["id"],
-            "username": u["username"],
-            "is_owner": u.get("is_owner", False),
-            "is_admin": u.get("is_admin", False),
-            "keep_all_forever": u.get("keep_all_forever", False),
-            "notify_before_delete": u.get("notify_before_delete", True),
-            "nickname_color": u.get("nickname_color") or "#00d9ff",
-            "theme_color": u.get("theme_color") or "#00d9ff",
-            "anonymous_mode": u.get("anonymous_mode", False),
-            "totp_enabled": u.get("totp_enabled", False),
-            "is_immune": is_immune(u)
-        },
-        "poll_config": POLL_CONFIG
-    })
+        return jsonify({
+            "user": {
+                "id": u["id"],
+                "username": u["username"],
+                "is_owner": u.get("is_owner", False),
+                "is_admin": u.get("is_admin", False),
+                "keep_all_forever": u.get("keep_all_forever", False),
+                "notify_before_delete": u.get("notify_before_delete", True),
+                "nickname_color": u.get("nickname_color") or "#00d9ff",
+                "theme_color": u.get("theme_color") or "#00d9ff",
+                "anonymous_mode": u.get("anonymous_mode", False),
+                "totp_enabled": u.get("totp_enabled", False),
+                "shards": u.get("shards", 0),
+                "leaderboard_opt_out": u.get("leaderboard_opt_out", False),
+                "is_immune": is_immune(u)
+            },
+            "poll_config": POLL_CONFIG
+        })
 
 
 # ============================================================
@@ -651,7 +743,8 @@ def update_profile():
     try:
         data = request.json or {}
         allowed = ["nickname_color", "theme_color", "anonymous_mode",
-                   "notify_before_delete", "keep_all_forever"]
+                   "notify_before_delete", "keep_all_forever",
+                   "leaderboard_opt_out", "bubble_color", "name_font", "msg_animation"]
         upd = {}
         for k in allowed:
             if k in data:
@@ -1193,7 +1286,7 @@ def send_message(cid):
         else:
             expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
 
-        is_anon = bool(data.get("anonymous")) and user.get("anonymous_mode", False)
+        is_anon = bool(data.get("anonymous")) and user.get("anonymous_mode", False)  # B1 fix: respects anonymous_mode flag
 
         msg = sb.table("messages").insert({
             "conversation_id": cid,
@@ -1418,6 +1511,9 @@ def get_announcements():
 @app.route("/api/announcements", methods=["POST"])
 @admin_required
 def create_announcement():
+    user = current_user()
+    if not has_permission(user, "can_create_announcements"):
+        return jsonify({"error": "You don't have permission"}), 403
     try:
         data = request.json or {}
         title = (data.get("title") or "").strip()
@@ -1734,6 +1830,139 @@ scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(cleanup_task, "interval", minutes=15, next_run_time=datetime.now())
 scheduler.start()
 
+
+# ============================================================
+#   v1.1 NEW ENDPOINTS (Emergency, Admin Rights, Affiliate, Shop, Leaderboard)
+# ============================================================
+
+# --- Emergency Viewer (N4-N7) ---
+@app.route("/api/admin/emergency/search")
+@admin_required
+def emergency_search():
+    user = current_user()
+    if not user.get("is_owner") and not has_permission(user, "can_view_messages"):
+        return jsonify({"error": "Permission denied"}), 403
+    q = request.args.get("q", "").strip().lower()
+    if len(q) < 2:
+        return jsonify({"users": []})
+    try:
+        users = sb.table("users").select("id,username").ilike("username", f"%{q}%").limit(20).execute().data
+        result = []
+        for u in users:
+            convs = sb.table("conversation_members").select("conversation_id,conversations(name,is_group)").eq("user_id", u["id"]).execute().data
+            result.append({"id": u["id"], "username": u["username"], "conversations": convs})
+        return jsonify({"users": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/emergency/messages/<cid>")
+@admin_required
+def emergency_messages(cid):
+    user = current_user()
+    if not user.get("is_owner") and not has_permission(user, "can_view_messages"):
+        return jsonify({"error": "Permission denied"}), 403
+    reason = request.args.get("reason", "").strip()
+    if not user.get("is_owner"):
+        if len(reason) < 10:
+            return jsonify({"error": "Reason must be at least 10 characters"}), 400
+        try:
+            sb.table("message_access_log").insert({
+                "viewer_id": user["id"], "conversation_id": cid, "reason": reason, "ip_address": get_ip()
+            }).execute()
+        except Exception:
+            pass
+    try:
+        msgs = sb.table("messages").select("*,users:sender_id(username)").eq("conversation_id", cid).eq("deleted", False).order("created_at").execute().data
+        return jsonify({"messages": msgs})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- Admin Rights (N8-N9) ---
+@app.route("/api/admin/permissions")
+@owner_required
+def get_admin_permissions():
+    try:
+        admins = sb.table("users").select("id,username").eq("is_admin", True).execute().data
+        for a in admins:
+            a["permissions"] = get_user_permissions(a["id"])
+        return jsonify({"admins": admins})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/admin/permissions/<uid>", methods=["POST"])
+@owner_required
+def update_admin_permissions(uid):
+    try:
+        data = request.json or {}
+        allowed = ["can_view_messages", "can_approve_affiliates", "can_create_announcements",
+                   "can_ban_ips", "can_suspend_users", "can_reset_passwords", "can_manage_shop"]
+        upd = {k: v for k, v in data.items() if k in allowed}
+        if upd:
+            sb.table("admin_permissions").upsert({"user_id": uid, **upd}).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- Affiliate (N11-N15) ---
+@app.route("/api/affiliate/codes")
+@login_required
+def my_affiliate_codes():
+    uid = session["user_id"]
+    try:
+        codes = sb.table("affiliate_codes").select("*").eq("user_id", uid).execute().data
+        return jsonify({"codes": codes})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/affiliate/create", methods=["POST"])
+@login_required
+def create_affiliate_code():
+    uid = session["user_id"]
+    code = (request.json or {}).get("code", "").strip()
+    if not (4 <= len(code) <= 20) or not code.replace("_", "").isalnum():
+        return jsonify({"error": "Invalid code format"}), 400
+    try:
+        sb.table("affiliate_codes").insert({"user_id": uid, "code": code, "approved": True}).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- Shop (N16-N19) ---
+@app.route("/api/shop/items")
+def shop_items():
+    try:
+        items = sb.table("shop_items").select("*").eq("active", True).execute().data
+        return jsonify({"items": items})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/shop/buy", methods=["POST"])
+@login_required
+def shop_buy():
+    uid = session["user_id"]
+    item_id = (request.json or {}).get("item_id")
+    try:
+        item = sb.table("shop_items").select("*").eq("id", item_id).execute().data[0]
+        user = current_user()
+        if user["shards"] < item["price"]:
+            return jsonify({"error": "Not enough shards"}), 400
+        sb.table("users").update({"shards": user["shards"] - item["price"]}).eq("id", uid).execute()
+        sb.table("user_purchases").insert({"user_id": uid, "item_id": item_id}).execute()
+        sb.table("shard_transactions").insert({
+            "user_id": uid, "amount": -item["price"], "type": "purchase", "description": item["name"]
+        }).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- Leaderboard (N20-N21) ---
+@app.route("/api/leaderboard")
+def leaderboard():
+    try:
+        users = sb.table("users").select("id,username,shards,created_at").eq("leaderboard_opt_out", False).order("shards", desc=True).limit(50).execute().data
+        return jsonify({"users": users})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ============================================================
 #   MAIN
