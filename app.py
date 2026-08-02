@@ -1,12 +1,13 @@
 """
 ============================================================
-  CIPHER v1.0.0 — Backend
+  CIPHER v1.1.0 — Backend
   Solo project by Stepundrik
 ============================================================
 """
 
 import os
 import io
+import re
 import base64
 import hashlib
 import secrets
@@ -42,14 +43,14 @@ else:
     sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ============================================================
-#   POLLING CONFIG (sent to frontend)
+#   POLLING CONFIG
 # ============================================================
 POLL_CONFIG = {
-    "active_ms": 3000,        # active chat, recent activity
-    "idle_ms": 8000,          # no new messages for a while
-    "very_idle_ms": 15000,    # long idle
-    "hidden_ms": 30000,       # tab is hidden
-    "idle_after_cycles": 5,   # after this many polls with no changes, slow down
+    "active_ms": 3000,
+    "idle_ms": 8000,
+    "very_idle_ms": 15000,
+    "hidden_ms": 30000,
+    "idle_after_cycles": 5,
     "very_idle_after_cycles": 20
 }
 
@@ -57,44 +58,50 @@ POLL_CONFIG = {
 #   ANTI-SPAM CONFIG
 # ============================================================
 SPAM_WINDOW_SECONDS = 10
-SPAM_MSG_THRESHOLD = 8         # more than this in window = spam
-SPAM_DUPLICATE_THRESHOLD = 3    # this many identical in a row = spam
-SPAM_WARNING_COOLDOWN = 30      # min seconds between warnings
-
-# Throttle delay per level (ms hint for frontend)
+SPAM_MSG_THRESHOLD = 8
+SPAM_DUPLICATE_THRESHOLD = 3
+SPAM_WARNING_COOLDOWN = 30
 THROTTLE_DELAY_MS = {0: 0, 1: 0, 2: 3000, 3: 3000, 4: 0, 5: 0}
 
 # ============================================================
-#   TERMS OF SERVICE (N1)
+#   COLOR NAME MAPPING (for dynamic credits joke)
 # ============================================================
-TOS_CONTENT = """
-<h2>Terms of Service — Cipher</h2>
-<p><strong>Effective Date:</strong> August 2026</p>
+COLOR_NAMES = {
+    (0, 217, 255): "cyan",
+    (239, 68, 68): "red",
+    (245, 158, 11): "orange",
+    (234, 179, 8): "yellow",
+    (34, 197, 94): "green",
+    (59, 130, 246): "blue",
+    (139, 92, 246): "purple",
+    (236, 72, 153): "pink",
+    (244, 63, 94): "rose",
+    (255, 255, 255): "white",
+    (0, 0, 0): "black",
+    (107, 114, 128): "gray",
+    (99, 102, 241): "indigo",
+    (20, 184, 166): "teal",
+    (249, 115, 22): "orange",
+}
 
-<h3>1. Service Description</h3>
-<p>Cipher is a private, end-to-end encrypted messaging platform designed for secure communication between users.</p>
-
-<h3>2. Data Retention</h3>
-<p>Messages are automatically deleted after the configured retention period (default: 30 days). Users can extend retention.</p>
-
-<h3>3. Privacy &amp; Emergency Access</h3>
-<p>Messages are private between participants. In cases of abuse, the site owner may access message content for moderation purposes. All admin access is logged. The owner has silent access rights.</p>
-
-<h3>4. Accounts &amp; Security</h3>
-<p>Users are responsible for maintaining the security of their accounts. A 12-word recovery phrase and downloadable recovery key are provided at signup.</p>
-
-<h3>5. Conduct</h3>
-<p>Harassment, spam, illegal content, or abuse of any kind is strictly prohibited.</p>
-
-<h3>6. Affiliate Program</h3>
-<p>Users may earn Shards by referring others. Self-referral or abuse is prohibited.</p>
-
-<h3>7. Virtual Currency (Shards)</h3>
-<p>Shards have no real-world value. All shop purchases are final.</p>
-
-<h3>8. Modifications</h3>
-<p>These Terms may be updated at any time. Continued use constitutes acceptance.</p>
-"""
+def get_color_name(hex_color):
+    """Get nearest color name from a hex code by RGB distance."""
+    if not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+        return "cyan"
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+    except ValueError:
+        return "cyan"
+    best = "cyan"
+    best_dist = float("inf")
+    for (cr, cg, cb), name in COLOR_NAMES.items():
+        d = (cr - r)**2 + (cg - g)**2 + (cb - b)**2
+        if d < best_dist:
+            best_dist = d
+            best = name
+    return best
 
 # ============================================================
 #   HELPERS
@@ -145,6 +152,39 @@ def is_ip_banned(ip):
         return False
 
 
+def get_admin_permissions(user_id):
+    """Fetch granular permissions for an admin. Returns dict with all perms as booleans."""
+    try:
+        res = sb.table("admin_permissions").select("*").eq("user_id", user_id).execute().data
+        if res:
+            return res[0]
+    except Exception:
+        pass
+    # Default: everything false
+    return {
+        "can_view_messages": False,
+        "can_approve_affiliates": False,
+        "can_create_announcements": False,
+        "can_ban_ips": False,
+        "can_suspend_ban_users": False,
+        "can_reset_passwords": False,
+        "can_manage_shop_items": False,
+        "can_manage_admins": False
+    }
+
+
+def has_permission(user, permission_key):
+    """Check if user has a specific permission. Owner bypasses all."""
+    if not user:
+        return False
+    if user.get("is_owner"):
+        return True
+    if not user.get("is_admin"):
+        return False
+    perms = get_admin_permissions(user["id"])
+    return perms.get(permission_key, False)
+
+
 def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -155,6 +195,7 @@ def login_required(f):
 
 
 def admin_required(f):
+    """Any admin or owner."""
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
@@ -182,6 +223,23 @@ def owner_required(f):
             return jsonify({"error": "Forbidden"}), 403
         return f(*args, **kwargs)
     return wrapper
+
+
+def permission_required(perm_key):
+    """Decorator: requires user to be owner OR admin with specific permission."""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            if "user_id" not in session:
+                return jsonify({"error": "Not signed in"}), 401
+            u = current_user()
+            if not u:
+                return jsonify({"error": "Session invalid"}), 401
+            if not has_permission(u, perm_key):
+                return jsonify({"error": f"You don't have permission ({perm_key})"}), 403
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def current_user():
@@ -224,13 +282,57 @@ def generate_recovery_phrase():
     return " ".join(secrets.choice(wordlist) for _ in range(12))
 
 
+def award_shards(user_id, amount, transaction_type, description, related_table=None, related_id=None, created_by=None):
+    """Add shards to a user's balance and log the transaction. Returns new balance."""
+    try:
+        # Get current balance
+        user_res = sb.table("users").select("shards").eq("id", user_id).execute().data
+        if not user_res:
+            return None
+        current = user_res[0].get("shards", 0) or 0
+        new_balance = current + amount
+        if new_balance < 0:
+            new_balance = 0
+        # Update balance
+        sb.table("users").update({"shards": new_balance}).eq("id", user_id).execute()
+        # Log transaction
+        sb.table("shard_transactions").insert({
+            "user_id": user_id,
+            "amount": amount,
+            "balance_after": new_balance,
+            "transaction_type": transaction_type,
+            "description": description,
+            "related_table": related_table,
+            "related_id": str(related_id) if related_id else None,
+            "created_by": created_by
+        }).execute()
+        return new_balance
+    except Exception as e:
+        print(f"[award_shards] {e}")
+        return None
+
+
+def ensure_user_profile(user_id):
+    """Make sure user_profiles row exists for this user. Creates one if not."""
+    try:
+        existing = sb.table("user_profiles").select("user_id").eq("user_id", user_id).execute().data
+        if not existing:
+            sb.table("user_profiles").insert({
+                "user_id": user_id,
+                "bio": "",
+                "active_effects": [],
+                "active_badges": []
+            }).execute()
+    except Exception as e:
+        print(f"[ensure_user_profile] {e}")
+
+
 # ============================================================
-#   ANTI-SPAM: check + apply warnings/throttle
+#   ANTI-SPAM
 # ============================================================
 def check_spam(user, content):
     """
     Returns: (throttle_delay_ms, warning_message_or_None)
-    Records events. Applies throttle upgrades.
     Immune users always pass.
     """
     if is_immune(user):
@@ -240,16 +342,13 @@ def check_spam(user, content):
     now = datetime.now(timezone.utc)
     window_start = (now - timedelta(seconds=SPAM_WINDOW_SECONDS)).isoformat()
 
-    # Check active throttle level
     level = user.get("throttle_level", 0) or 0
     throttle_until = user.get("throttle_until")
 
-    # Check if throttle expired
     if throttle_until:
         try:
             exp = datetime.fromisoformat(throttle_until.replace("Z", "+00:00"))
             if exp < now and level in (2,):
-                # level 2 was time-limited, reset to 1
                 sb.table("users").update({
                     "throttle_level": 1,
                     "throttle_until": None
@@ -258,10 +357,8 @@ def check_spam(user, content):
         except Exception:
             pass
 
-    # Level 3+ = permanent throttle, always apply delay
     current_delay = THROTTLE_DELAY_MS.get(level, 0)
 
-    # Insert this message into recent_messages
     content_hash = hash_content(content)
     try:
         sb.table("recent_messages").insert({
@@ -271,7 +368,6 @@ def check_spam(user, content):
     except Exception:
         pass
 
-    # Count messages in window
     try:
         recent = sb.table("recent_messages").select("content_hash").eq("user_id", uid).gt("created_at", window_start).execute().data
     except Exception:
@@ -292,7 +388,6 @@ def check_spam(user, content):
     if not is_spam:
         return current_delay, None
 
-    # Cooldown check — don't warn if last warning was recent
     last_warn = user.get("last_warning_at")
     if last_warn:
         try:
@@ -302,7 +397,6 @@ def check_spam(user, content):
         except Exception:
             pass
 
-    # Escalate warning
     warnings = (user.get("spam_warnings", 0) or 0) + 1
 
     warning_msg = ""
@@ -323,7 +417,6 @@ def check_spam(user, content):
         warning_msg = "⚠️ Warning 3 of 5. The throttle on your account is now PERMANENT."
     elif warnings == 4:
         updates["throttle_level"] = 4
-        # 24h ban via user_punishments
         try:
             sb.table("user_punishments").insert({
                 "user_id": uid,
@@ -337,7 +430,6 @@ def check_spam(user, content):
         warning_msg = "🚫 Warning 4 of 5. You are BANNED for 24 hours."
     elif warnings >= 5:
         updates["throttle_level"] = 5
-        # Permanent IP ban
         try:
             sb.table("bans").upsert({
                 "ip_address": get_ip(),
@@ -348,19 +440,17 @@ def check_spam(user, content):
             pass
         warning_msg = "🚫 Warning 5 of 5. Your IP is now PERMANENTLY BANNED. Goodbye."
 
-    # Persist changes
     try:
         sb.table("users").update(updates).eq("id", uid).execute()
     except Exception:
         pass
 
-    # Log event
     try:
         sb.table("spam_events").insert({
             "user_id": uid,
+            "message_count": msg_count,
             "trigger_reason": reason,
-            "warning_number": warnings,
-            "ip_address": get_ip()
+            "warning_number": warnings
         }).execute()
     except Exception:
         pass
@@ -370,7 +460,7 @@ def check_spam(user, content):
 
 
 # ============================================================
-#   BEFORE-REQUEST: IP BAN CHECK (with immunity bypass)
+#   BEFORE-REQUEST: IP BAN + SESSION ENFORCEMENT (FIXES B2!)
 # ============================================================
 @app.before_request
 def check_before_request():
@@ -380,47 +470,89 @@ def check_before_request():
             return
 
     ip = get_ip()
+
+    # IP ban check (with immunity bypass)
     if sb and ip and is_ip_banned(ip):
         if "user_id" in session:
             try:
                 u = sb.table("users").select("*").eq("id", session["user_id"]).execute().data
-                if u:
-                    user = u[0]
-                    if user.get("is_owner") or user.get("is_admin") or is_immune(user):
-                        return
+                if u and (u[0].get("is_owner") or u[0].get("is_admin") or is_immune(u[0])):
+                    pass  # allowed through
+                else:
+                    return jsonify({"error": "Your IP is banned from this service.", "banned": True}), 403
             except Exception:
-                pass
-        return jsonify({"error": "Your IP is banned from this service.", "banned": True}), 403
+                return jsonify({"error": "Your IP is banned from this service.", "banned": True}), 403
+        else:
+            return jsonify({"error": "Your IP is banned from this service.", "banned": True}), 403
 
-    # === v1.1: Session enforcement for suspend + account ban (B2 + I5) ===
+    # Session enforcement: if logged in, check suspend/ban status on EVERY request
     if "user_id" in session:
+        # Skip enforcement on logout endpoint so users can always log out
+        if request.path == "/api/logout":
+            return
         try:
             u = sb.table("users").select("*").eq("id", session["user_id"]).execute().data
-            if u:
-                user = u[0]
-                if is_immune(user):
-                    return
-                if user.get("suspended"):
-                    session.clear()
-                    return jsonify({"error": "Your account has been restricted", "suspended": True}), 403
+            if not u:
+                # User no longer exists — kill session
+                session.clear()
+                return jsonify({"error": "Session expired", "logout": True}), 401
+            user = u[0]
 
-                try:
-                    pun = sb.table("user_punishments").select("*").eq("user_id", user["id"]).eq("active", True).eq("type", "ban").execute().data
-                    if pun:
-                        p = pun[0]
-                        still_active = True
-                        if p.get("expires_at"):
-                            exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
-                            if exp < datetime.now(timezone.utc):
-                                sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
-                                still_active = False
-                        if still_active:
+            # Owner and immune users bypass all checks
+            if user.get("is_owner") or is_immune(user):
+                return
+
+            # Suspended?
+            if user.get("suspended"):
+                # Check if suspended_until exists and expired
+                suspended_until = user.get("suspended_until")
+                if suspended_until:
+                    try:
+                        exp = datetime.fromisoformat(suspended_until.replace("Z", "+00:00"))
+                        if exp < datetime.now(timezone.utc):
+                            # Suspension expired, lift it
+                            sb.table("users").update({
+                                "suspended": False,
+                                "suspended_until": None,
+                                "suspension_reason": None
+                            }).eq("id", user["id"]).execute()
+                        else:
                             session.clear()
-                            return jsonify({"error": "Your account has been restricted", "banned": True}), 403
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                            reason = user.get("suspension_reason") or "no reason given"
+                            return jsonify({
+                                "error": f"Your account has been suspended: {reason}",
+                                "logout": True,
+                                "suspended": True
+                            }), 403
+                    except Exception:
+                        session.clear()
+                        return jsonify({"error": "Your account is suspended", "logout": True}), 403
+                else:
+                    session.clear()
+                    return jsonify({"error": "Your account is suspended", "logout": True}), 403
+
+            # Active ban punishment?
+            try:
+                puns = sb.table("user_punishments").select("*").eq("user_id", user["id"]).eq("active", True).eq("type", "ban").execute().data
+                for p in puns:
+                    still_active = True
+                    if p.get("expires_at"):
+                        exp = datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00"))
+                        if exp < datetime.now(timezone.utc):
+                            sb.table("user_punishments").update({"active": False}).eq("id", p["id"]).execute()
+                            still_active = False
+                    if still_active:
+                        session.clear()
+                        reason = p.get("reason") or "no reason given"
+                        return jsonify({
+                            "error": f"Your account is banned: {reason}",
+                            "logout": True,
+                            "banned": True
+                        }), 403
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[session_enforce] {e}")
 
 
 # ============================================================
@@ -433,11 +565,9 @@ def index():
 
 @app.route("/health")
 def health():
-        return jsonify({"status": "ok", "time": now_iso(), "version": "1.1.0"})
-
-
-# ============================================================
-#   AUTH — SIGNUP
+    return jsonify({"status": "ok", "time": now_iso(), "version": "1.1.0"})
+  # ============================================================
+#   AUTH — SIGNUP (with ToS acceptance + affiliate code support)
 # ============================================================
 @app.route("/api/signup", methods=["POST"])
 def signup():
@@ -446,7 +576,10 @@ def signup():
         username = (data.get("username") or "").strip().lower()
         password = data.get("password") or ""
         invite_code = (data.get("invite_code") or "").strip()
+        affiliate_code = (data.get("affiliate_code") or "").strip()
+        accepted_tos = data.get("accepted_tos", False)
 
+        # Validate
         if len(username) < 3:
             return jsonify({"error": "Username must be at least 3 characters"}), 400
         if len(username) > 20:
@@ -455,16 +588,15 @@ def signup():
             return jsonify({"error": "Username can only contain letters, numbers, and underscores"}), 400
         if len(password) < 6:
             return jsonify({"error": "Password must be at least 6 characters"}), 400
+        if not accepted_tos:
+            return jsonify({"error": "You must accept the Terms of Service"}), 400
 
         settings_res = sb.table("admin_settings").select("*").eq("id", 1).execute().data
         settings = settings_res[0] if settings_res else {}
         if not settings.get("signups_enabled", True) and not invite_code:
             return jsonify({"error": "Signups are currently disabled. You need an invite code."}), 403
 
-        # v1.1 ToS acceptance required (N2)
-        if not data.get("tos_accepted"):
-            return jsonify({"error": "You must accept the Terms of Service"}), 400
-
+        # Validate invite code if provided
         invite = None
         if invite_code:
             inv_res = sb.table("invite_links").select("*").eq("code", invite_code).execute().data
@@ -480,6 +612,18 @@ def signup():
             if invite.get("max_uses") and invite.get("uses_count", 0) >= invite["max_uses"]:
                 return jsonify({"error": "This invite has reached its maximum uses"}), 400
 
+        # Validate affiliate code if provided
+        affiliate = None
+        if affiliate_code:
+            aff_res = sb.table("affiliate_codes").select("*").ilike("code", affiliate_code).execute().data
+            if not aff_res:
+                return jsonify({"error": "Invalid affiliate code"}), 400
+            affiliate = aff_res[0]
+            if affiliate.get("revoked"):
+                return jsonify({"error": "This affiliate code has been revoked"}), 400
+            if not affiliate.get("approved"):
+                return jsonify({"error": "This affiliate code is not active yet"}), 400
+
         exists = sb.table("users").select("id").eq("username", username).execute().data
         if exists:
             return jsonify({"error": "Username already taken"}), 400
@@ -493,48 +637,58 @@ def signup():
         recovery_key = secrets.token_hex(48)
         key_hash = bcrypt.hashpw(recovery_key.encode(), bcrypt.gensalt()).decode()
 
+        signup_ip = get_ip()
+
         new_user = sb.table("users").insert({
             "username": username,
             "password_hash": pw_hash,
             "is_owner": is_owner,
             "is_admin": is_owner,
-            "last_ip": get_ip(),
+            "last_ip": signup_ip,
             "recovery_phrase": phrase_hash,
             "nickname_color": "#00d9ff",
-            "theme_color": "#00d9ff",
-            "shards": 0,
-            "leaderboard_opt_out": False,
-            "anonymous_mode": False
+            "theme_color": "#00d9ff"
         }).execute().data[0]
 
-        # Create default profile row (v1.1)
-        try:
-            sb.table("user_profiles").insert({"user_id": new_user["id"]}).execute()
-        except Exception:
-            pass
-
-        # Create default admin_permissions for owner
-        if is_owner:
-            try:
-                sb.table("admin_permissions").insert({"user_id": new_user["id"]}).execute()
-            except Exception:
-                pass
-
+        # Recovery key
         sb.table("recovery_keys").insert({
             "user_id": new_user["id"],
             "key_hash": key_hash,
             "method": "file"
         }).execute()
 
-        # v1.1: Record ToS acceptance (N2)
+        # ToS acceptance
         try:
             sb.table("terms_acceptance").insert({
                 "user_id": new_user["id"],
-                "version": "1.0"
+                "accepted_version": "v1.1.0",
+                "ip": signup_ip,
+                "user_agent": request.headers.get("User-Agent", "")[:500]
             }).execute()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[signup tos] {e}")
 
+        # User profile
+        ensure_user_profile(new_user["id"])
+
+        # Owner admin permissions (all granted implicitly, but we insert row for consistency)
+        if is_owner:
+            try:
+                sb.table("admin_permissions").insert({
+                    "user_id": new_user["id"],
+                    "can_view_messages": True,
+                    "can_approve_affiliates": True,
+                    "can_create_announcements": True,
+                    "can_ban_ips": True,
+                    "can_suspend_ban_users": True,
+                    "can_reset_passwords": True,
+                    "can_manage_shop_items": True,
+                    "can_manage_admins": True
+                }).execute()
+            except Exception:
+                pass
+
+        # Handle invite
         if invite:
             sb.table("invite_links").update({
                 "uses_count": invite.get("uses_count", 0) + 1
@@ -542,8 +696,46 @@ def signup():
             sb.table("invite_uses").insert({
                 "invite_id": invite["id"],
                 "user_id": new_user["id"],
-                "ip_address": get_ip()
+                "ip_address": signup_ip
             }).execute()
+
+        # Handle affiliate — award shards to referrer
+        if affiliate:
+            # Self-referral protection: check if referrer's last_ip matches signup IP
+            referrer = sb.table("users").select("id,username,last_ip").eq("id", affiliate["user_id"]).execute().data
+            if referrer:
+                referrer_row = referrer[0]
+                if referrer_row["id"] == new_user["id"]:
+                    pass  # can't self-refer, but just skip silently
+                elif referrer_row.get("last_ip") and referrer_row.get("last_ip") == signup_ip:
+                    pass  # same IP, likely self-refer attempt, skip
+                else:
+                    shards_amount = settings.get("shards_per_referral", 10) or 10
+                    # Record affiliate use
+                    try:
+                        sb.table("affiliate_uses").insert({
+                            "code_id": affiliate["id"],
+                            "referrer_id": affiliate["user_id"],
+                            "referred_user_id": new_user["id"],
+                            "shards_awarded": shards_amount,
+                            "signup_ip": signup_ip
+                        }).execute()
+                        # Update affiliate stats
+                        sb.table("affiliate_codes").update({
+                            "uses": (affiliate.get("uses", 0) or 0) + 1,
+                            "total_earned": (affiliate.get("total_earned", 0) or 0) + shards_amount
+                        }).eq("id", affiliate["id"]).execute()
+                        # Award shards
+                        award_shards(
+                            affiliate["user_id"],
+                            shards_amount,
+                            "referral",
+                            f"Referral: {username} signed up with your code",
+                            related_table="affiliate_uses",
+                            related_id=affiliate["id"]
+                        )
+                    except Exception as e:
+                        print(f"[affiliate award] {e}")
 
         session.permanent = True
         session["user_id"] = new_user["id"]
@@ -580,10 +772,12 @@ def login():
             return jsonify({"error": "Invalid username or password"}), 400
         user = res[0]
 
+        # Suspension (only if not immune)
         if user.get("suspended") and not is_immune(user):
-            return jsonify({"error": "This account has been suspended"}), 403
+            reason = user.get("suspension_reason") or "no reason given"
+            return jsonify({"error": f"This account is suspended: {reason}"}), 403
 
-        # Active ban punishment (immune users bypass)
+        # Ban punishment (only if not immune)
         if not is_immune(user):
             try:
                 pun = sb.table("user_punishments").select("*").eq("user_id", user["id"]).eq("active", True).eq("type", "ban").execute().data
@@ -604,6 +798,7 @@ def login():
         if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
             return jsonify({"error": "Invalid username or password"}), 400
 
+        # 2FA challenge
         if user.get("totp_enabled") and user.get("totp_secret"):
             if not totp_code:
                 return jsonify({"needs_2fa": True}), 200
@@ -611,10 +806,14 @@ def login():
             if not totp.verify(totp_code, valid_window=1):
                 return jsonify({"error": "Invalid 2FA code", "needs_2fa": True}), 400
 
+        # Update last seen
         sb.table("users").update({
             "last_ip": get_ip(),
             "last_seen": now_iso()
         }).eq("id", user["id"]).execute()
+
+        # Ensure profile row exists
+        ensure_user_profile(user["id"])
 
         session.permanent = True
         session["user_id"] = user["id"]
@@ -644,24 +843,61 @@ def me():
     u = current_user()
     if not u:
         return jsonify({"user": None, "poll_config": POLL_CONFIG})
-        return jsonify({
-            "user": {
-                "id": u["id"],
-                "username": u["username"],
-                "is_owner": u.get("is_owner", False),
-                "is_admin": u.get("is_admin", False),
-                "keep_all_forever": u.get("keep_all_forever", False),
-                "notify_before_delete": u.get("notify_before_delete", True),
-                "nickname_color": u.get("nickname_color") or "#00d9ff",
-                "theme_color": u.get("theme_color") or "#00d9ff",
-                "anonymous_mode": u.get("anonymous_mode", False),
-                "totp_enabled": u.get("totp_enabled", False),
-                "shards": u.get("shards", 0),
-                "leaderboard_opt_out": u.get("leaderboard_opt_out", False),
-                "is_immune": is_immune(u)
-            },
-            "poll_config": POLL_CONFIG
-        })
+
+    # Get profile data
+    profile = {}
+    try:
+        prof_res = sb.table("user_profiles").select("*").eq("user_id", u["id"]).execute().data
+        if prof_res:
+            profile = prof_res[0]
+    except Exception:
+        pass
+
+    # Get permissions if admin
+    permissions = {}
+    if u.get("is_admin") or u.get("is_owner"):
+        permissions = get_admin_permissions(u["id"])
+        # Owner has all permissions implicitly
+        if u.get("is_owner"):
+            for key in ["can_view_messages", "can_approve_affiliates", "can_create_announcements",
+                        "can_ban_ips", "can_suspend_ban_users", "can_reset_passwords",
+                        "can_manage_shop_items", "can_manage_admins"]:
+                permissions[key] = True
+
+    return jsonify({
+        "user": {
+            "id": u["id"],
+            "username": u["username"],
+            "is_owner": u.get("is_owner", False),
+            "is_admin": u.get("is_admin", False),
+            "is_immune": is_immune(u),
+            "keep_all_forever": u.get("keep_all_forever", False),
+            "notify_before_delete": u.get("notify_before_delete", True),
+            "nickname_color": u.get("nickname_color") or "#00d9ff",
+            "theme_color": u.get("theme_color") or "#00d9ff",
+            "anonymous_mode": u.get("anonymous_mode", False),
+            "totp_enabled": u.get("totp_enabled", False),
+            "shards": u.get("shards", 0) or 0,
+            "leaderboard_opt_out": u.get("leaderboard_opt_out", False),
+            "bubble_color": u.get("bubble_color"),
+            "name_font": u.get("name_font"),
+            "msg_animation": u.get("msg_animation"),
+            # Profile data
+            "bio": profile.get("bio", ""),
+            "avatar_url": profile.get("avatar_url"),
+            "banner_color": profile.get("banner_color"),
+            "active_effects": profile.get("active_effects", []) or [],
+            "active_badges": profile.get("active_badges", []) or [],
+            "active_bubble_color": profile.get("active_bubble_color"),
+            "active_nickname_font": profile.get("active_nickname_font"),
+            "active_message_animation": profile.get("active_message_animation"),
+            # Permissions
+            "permissions": permissions,
+            # Dynamic credits joke color name
+            "theme_color_name": get_color_name(u.get("theme_color") or "#00d9ff")
+        },
+        "poll_config": POLL_CONFIG
+    })
 
 
 # ============================================================
@@ -742,15 +978,24 @@ def recover_key():
 def update_profile():
     try:
         data = request.json or {}
-        allowed = ["nickname_color", "theme_color", "anonymous_mode",
-                   "notify_before_delete", "keep_all_forever",
-                   "leaderboard_opt_out", "bubble_color", "name_font", "msg_animation"]
-        upd = {}
-        for k in allowed:
-            if k in data:
-                upd[k] = data[k]
-        if upd:
-            sb.table("users").update(upd).eq("id", session["user_id"]).execute()
+        # Fields on users table
+        user_allowed = ["nickname_color", "theme_color", "anonymous_mode",
+                        "notify_before_delete", "keep_all_forever",
+                        "leaderboard_opt_out"]
+        user_upd = {k: v for k, v in data.items() if k in user_allowed}
+        if user_upd:
+            sb.table("users").update(user_upd).eq("id", session["user_id"]).execute()
+
+        # Fields on user_profiles table
+        profile_allowed = ["bio", "banner_color"]
+        profile_upd = {k: v for k, v in data.items() if k in profile_allowed}
+        if profile_upd:
+            ensure_user_profile(session["user_id"])
+            # Validate bio length
+            if "bio" in profile_upd and profile_upd["bio"] and len(profile_upd["bio"]) > 160:
+                profile_upd["bio"] = profile_upd["bio"][:160]
+            sb.table("user_profiles").update(profile_upd).eq("user_id", session["user_id"]).execute()
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -791,18 +1036,30 @@ def delete_account():
 
         uid = session["user_id"]
 
+        # Owner cannot self-delete via this
+        u = current_user()
+        if u and u.get("is_owner"):
+            return jsonify({"error": "The owner account cannot be deleted from within the app. Contact support."}), 403
+
+        # Mark messages deleted (preserves them for other participants)
         sb.table("messages").update({
             "deleted": True,
             "content": "[deleted]",
             "image_url": None
         }).eq("sender_id", uid).execute()
 
+        # Remove from all tables
         sb.table("conversation_members").delete().eq("user_id", uid).execute()
         sb.table("recovery_keys").delete().eq("user_id", uid).execute()
         sb.table("message_reactions").delete().eq("user_id", uid).execute()
         sb.table("message_reads").delete().eq("user_id", uid).execute()
         sb.table("typing_status").delete().eq("user_id", uid).execute()
         sb.table("recent_messages").delete().eq("user_id", uid).execute()
+        sb.table("user_profiles").delete().eq("user_id", uid).execute()
+        sb.table("user_purchases").delete().eq("user_id", uid).execute()
+        sb.table("shard_transactions").delete().eq("user_id", uid).execute()
+        sb.table("terms_acceptance").delete().eq("user_id", uid).execute()
+        sb.table("admin_permissions").delete().eq("user_id", uid).execute()
         sb.table("users").delete().eq("id", uid).execute()
 
         session.clear()
@@ -812,7 +1069,7 @@ def delete_account():
 
 
 # ============================================================
-#   2FA
+#   2FA SETUP
 # ============================================================
 @app.route("/api/2fa/setup", methods=["POST"])
 @login_required
@@ -882,9 +1139,7 @@ def disable_2fa():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-# ============================================================
+      # ============================================================
 #   CONVERSATIONS
 # ============================================================
 @app.route("/api/conversations")
@@ -917,7 +1172,8 @@ def list_conversations():
                 c["muted"] = muted_map.get(c["id"], False)
                 c["i_am_group_admin"] = gadmin_map.get(c["id"], False)
 
-                last = sb.table("messages").select("content,created_at,image_url").eq("conversation_id", c["id"]).eq("deleted", False).order("created_at", desc=True).limit(1).execute().data
+                # Last message preview
+                last = sb.table("messages").select("content,created_at,image_url,is_anonymous").eq("conversation_id", c["id"]).eq("deleted", False).order("created_at", desc=True).limit(1).execute().data
                 if last:
                     preview = last[0].get("content", "") or ("📷 Image" if last[0].get("image_url") else "")
                     c["last_message"] = (preview[:50] + "…") if len(preview) > 50 else preview
@@ -1120,9 +1376,13 @@ def export_conv(cid):
             ""
         ]
         for msg in msgs:
-            who = "unknown"
-            if msg.get("users"):
-                who = msg["users"].get("username", "unknown")
+            # Anonymous mode: hide the sender's name in exports too
+            if msg.get("is_anonymous"):
+                who = "Anonymous"
+            else:
+                who = "unknown"
+                if msg.get("users"):
+                    who = msg["users"].get("username", "unknown")
             when = datetime.fromisoformat(msg["created_at"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
             content = msg.get("content") or ("[image]" if msg.get("image_url") else "[empty]")
             lines.append(f"[{when}] {who}: {content}")
@@ -1137,7 +1397,7 @@ def export_conv(cid):
 
 
 # ============================================================
-#   MESSAGES
+#   MESSAGES (with anonymous fix B1)
 # ============================================================
 @app.route("/api/messages/<cid>")
 @login_required
@@ -1181,14 +1441,29 @@ def get_messages(cid):
         soon = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
         expiring_soon = 0
 
+        # ============================================================
+        # ANONYMOUS FIX (B1): If message is_anonymous, strip sender data
+        # UNLESS the viewer is the sender themselves (they see their own msgs normally)
+        # ============================================================
         for msg in msgs:
             msg["reactions"] = reactions_map.get(msg["id"], [])
             msg["read_by"] = reads_map.get(msg["id"], [])
+
+            if msg.get("is_anonymous") and msg.get("sender_id") != uid:
+                # Hide sender identity from recipients
+                msg["users"] = {"username": "Anonymous", "nickname_color": "#8892a6"}
+                # Also strip the internal sender_id so client can't correlate
+                # But we keep it internally for the sender's own view detection
+                msg["sender_id_hidden"] = True
+                msg["sender_id"] = None
+
             if msg.get("expires_at") and msg["expires_at"] < soon:
                 expiring_soon += 1
 
+        # Mark as read
         for msg in msgs:
-            if msg["sender_id"] != uid:
+            actual_sender = msg.get("sender_id")
+            if actual_sender and actual_sender != uid:
                 try:
                     sb.table("message_reads").upsert({
                         "message_id": msg["id"],
@@ -1244,11 +1519,9 @@ def send_message(cid):
         if not content and not image_data:
             return jsonify({"error": "Empty message"}), 400
 
-        # === ANTI-SPAM CHECK ===
+        # ANTI-SPAM CHECK
         throttle_delay, warning = check_spam(user, content)
 
-        # If they just got a level 4 or 5 warning, block this message
-        # Re-fetch user in case check_spam updated throttle_level
         try:
             fresh = sb.table("users").select("throttle_level").eq("id", uid).execute().data
             if fresh and fresh[0].get("throttle_level", 0) >= 4:
@@ -1259,14 +1532,41 @@ def send_message(cid):
         except Exception:
             pass
 
+        # ============================================================
+        # ANONYMOUS FIX (B1): Read anonymous_mode from user profile
+        # Message is marked is_anonymous automatically if user has mode on
+        # ============================================================
+        is_anon = bool(user.get("anonymous_mode", False))
+
+        # Image upload
         image_url = None
         if image_data:
             try:
+                # Check for perk_upload_10mb_30_days (allows 10MB uploads)
+                max_size = 5 * 1024 * 1024
+                try:
+                    perk_check = sb.table("user_purchases").select("expires_at,shop_items!inner(item_key)").eq("user_id", uid).execute().data
+                    for pu in perk_check:
+                        item = pu.get("shop_items")
+                        if item and item.get("item_key") == "perk_upload_10mb_30_days":
+                            # Check not expired
+                            if pu.get("expires_at"):
+                                exp = datetime.fromisoformat(pu["expires_at"].replace("Z", "+00:00"))
+                                if exp > datetime.now(timezone.utc):
+                                    max_size = 10 * 1024 * 1024
+                                    break
+                            else:
+                                max_size = 10 * 1024 * 1024
+                                break
+                except Exception:
+                    pass
+
                 if "," in image_data:
                     image_data = image_data.split(",", 1)[1]
                 img_bytes = base64.b64decode(image_data)
-                if len(img_bytes) > 5 * 1024 * 1024:
-                    return jsonify({"error": "Image too large (max 5 MB)"}), 400
+                if len(img_bytes) > max_size:
+                    mb = max_size // (1024 * 1024)
+                    return jsonify({"error": f"Image too large (max {mb} MB)"}), 400
                 filename = f"{uid}/{secrets.token_hex(12)}.jpg"
                 sb.storage.from_("cipher-images").upload(
                     filename, img_bytes,
@@ -1276,17 +1576,33 @@ def send_message(cid):
             except Exception as e:
                 return jsonify({"error": f"Image upload failed: {str(e)}"}), 500
 
+        # Retention
         conv = sb.table("conversations").select("keep_forever").eq("id", cid).execute().data
         settings = sb.table("admin_settings").select("default_retention_days").eq("id", 1).execute().data
         keep = conv[0].get("keep_forever", False) if conv else False
         days = settings[0].get("default_retention_days", 30) if settings else 30
 
+        # Check for perk_retention_30_days (adds 30 days to retention)
+        try:
+            perks = sb.table("user_purchases").select("expires_at,shop_items!inner(item_key)").eq("user_id", uid).execute().data
+            for pu in perks:
+                item = pu.get("shop_items")
+                if item and item.get("item_key") == "perk_retention_30_days":
+                    if pu.get("expires_at"):
+                        exp = datetime.fromisoformat(pu["expires_at"].replace("Z", "+00:00"))
+                        if exp > datetime.now(timezone.utc):
+                            days += 30
+                            break
+                    else:
+                        days += 30
+                        break
+        except Exception:
+            pass
+
         if keep or user.get("keep_all_forever", False):
             expires_at = None
         else:
             expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-
-        is_anon = bool(data.get("anonymous")) and user.get("anonymous_mode", False)  # B1 fix: respects anonymous_mode flag
 
         msg = sb.table("messages").insert({
             "conversation_id": cid,
@@ -1421,6 +1737,13 @@ def search():
         if not conv_ids:
             return jsonify({"results": []})
         results = sb.table("messages").select("*,users:sender_id(username)").in_("conversation_id", conv_ids).eq("deleted", False).ilike("content", f"%{q}%").order("created_at", desc=True).limit(30).execute().data
+
+        # Apply anonymous filter to search results too
+        for r in results:
+            if r.get("is_anonymous") and r.get("sender_id") != uid:
+                r["users"] = {"username": "Anonymous"}
+                r["sender_id"] = None
+
         return jsonify({"results": results})
     except Exception:
         return jsonify({"results": []})
@@ -1509,11 +1832,8 @@ def get_announcements():
 
 
 @app.route("/api/announcements", methods=["POST"])
-@admin_required
+@permission_required("can_create_announcements")
 def create_announcement():
-    user = current_user()
-    if not has_permission(user, "can_create_announcements"):
-        return jsonify({"error": "You don't have permission"}), 403
     try:
         data = request.json or {}
         title = (data.get("title") or "").strip()
@@ -1536,7 +1856,7 @@ def create_announcement():
 
 
 @app.route("/api/announcements/<ann_id>", methods=["DELETE"])
-@admin_required
+@permission_required("can_create_announcements")
 def delete_announcement(ann_id):
     try:
         sb.table("announcements").update({"active": False}).eq("id", ann_id).execute()
@@ -1544,10 +1864,105 @@ def delete_announcement(ann_id):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+      # ============================================================
+#   TERMS OF SERVICE — content endpoint
+# ============================================================
+
+TOS_CONTENT = """# Terms of Service
+
+**Version 1.1.0 — Last updated August 2026**
+
+Welcome to Cipher. By using this service, you agree to these terms. Please read them carefully.
+
+## 1. What Cipher Is
+
+Cipher is a private messaging platform. You can send text messages, images, and communicate with other users through direct or group chats.
+
+## 2. Message Retention
+
+Messages are automatically deleted after 30 days by default (this may be adjusted). You can:
+- Extend individual messages or all messages in a chat by 30 more days
+- Keep all your own messages forever (setting in your profile)
+- Export any conversation as a text file before it's deleted
+
+## 3. Privacy & Message Access
+
+Your messages are private between you and the other participants in each conversation.
+
+**Important disclosure:** The owner of this service retains the ability to access message contents in cases of abuse investigation or serious rule violations. This is used only for moderation. When administrators access messages, the access is logged with a reason. When the owner accesses messages, no log is kept.
+
+By using Cipher, you understand and accept this reality. Cipher is not end-to-end encrypted.
+
+## 4. Anonymous Mode
+
+Anonymous mode hides your username from message recipients (they see "Anonymous" instead of your real name). However:
+- Your identity is still known to the server owner
+- Anonymous mode does not make you truly invisible
+- It is a social feature, not a security feature
+
+## 5. Accounts
+
+- You are responsible for keeping your password and recovery keys safe
+- We provide a 12-word recovery phrase and a downloadable recovery key file at signup
+- We cannot recover your account without these
+- You can enable two-factor authentication for extra security
+
+## 6. Conduct Rules
+
+You may not use Cipher for:
+- Harassment, threats, or bullying
+- Spam or automated messaging
+- Illegal content or activities
+- Sharing others' private information without consent
+- Impersonating others in bad faith
+
+Violations may result in warnings, muting, banning, or account deletion.
+
+## 7. Affiliate Program
+
+You may create affiliate codes to invite friends. When they sign up with your code, you earn Shards. Rules:
+- No self-referring (creating alt accounts to earn Shards)
+- No paying users to sign up with your code
+- Abuse of the affiliate system results in Shard removal and possible account action
+
+## 8. Shards & Shop
+
+Shards are a virtual currency with no real-world value. You earn them by referring users. You spend them on cosmetic items and small conveniences.
+
+- Purchases are final — no refunds
+- Cosmetic items are visible to other users
+- Perks that last a set number of days will expire at that time
+- The owner may adjust prices or remove items
+
+## 9. Data Deletion
+
+You can delete your account at any time from your settings. This will:
+- Permanently remove your account
+- Mark your messages as deleted (they will show "[deleted]" to other participants)
+- Remove all your Shards, purchases, and profile data
+
+Some information may remain in system logs for a limited period.
+
+## 10. Changes to Terms
+
+These terms may be updated. Continued use of Cipher after changes means acceptance of the new terms.
+
+## 11. Contact
+
+This is a solo project. There is no formal support channel. Use the service at your own risk.
+
+---
+
+By clicking "Accept" during signup, you confirm you have read and agreed to these terms.
+"""
+
+@app.route("/api/tos")
+def get_tos():
+    return jsonify({"tos": TOS_CONTENT, "version": "v1.1.0"})
 
 
 # ============================================================
-#   ADMIN
+#   ADMIN — STATS
 # ============================================================
 @app.route("/api/admin/stats")
 @admin_required
@@ -1570,20 +1985,51 @@ def admin_stats():
         return jsonify({"users": 0, "messages": 0, "conversations": 0, "bans": 0, "active_24h": 0})
 
 
+# ============================================================
+#   ADMIN — USERS (with search + pagination — improvements I1, I2)
+# ============================================================
 @app.route("/api/admin/users")
 @admin_required
 def admin_users():
     try:
-        users = sb.table("users").select("id,username,is_admin,is_owner,suspended,can_create_invites,can_send_messages,keep_all_forever,last_ip,created_at,last_seen,nickname_color,totp_enabled,spam_warnings,throttle_level").order("created_at").execute().data
-        # Mark immune status
+        search_q = (request.args.get("search") or "").strip().lower()
+        try:
+            offset = int(request.args.get("offset", 0))
+            limit = min(int(request.args.get("limit", 20)), 100)
+        except ValueError:
+            offset, limit = 0, 20
+
+        query = sb.table("users").select(
+            "id,username,is_admin,is_owner,suspended,suspended_until,suspension_reason,"
+            "can_create_invites,can_send_messages,keep_all_forever,last_ip,created_at,"
+            "last_seen,nickname_color,totp_enabled,spam_warnings,throttle_level,shards",
+            count="exact"
+        )
+
+        if search_q:
+            query = query.ilike("username", f"%{search_q}%")
+
+        result = query.order("created_at").range(offset, offset + limit - 1).execute()
+        users = result.data
+        total = result.count or 0
+
+        # Mark immune
         try:
             imm = sb.table("immunity_list").select("username").execute().data
             immune_set = {i["username"] for i in imm}
         except Exception:
             immune_set = set()
+
         for u in users:
             u["is_immune"] = u.get("is_owner", False) or u["username"] in immune_set
-        return jsonify({"users": users})
+
+        return jsonify({
+            "users": users,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": (offset + len(users)) < total
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1592,7 +2038,6 @@ def admin_users():
 @admin_required
 def admin_update_user(uid):
     try:
-        # Block updates to immune users (except by owner)
         me = current_user()
         target = sb.table("users").select("*").eq("id", uid).execute().data
         if target and is_immune(target[0]) and not me.get("is_owner"):
@@ -1602,6 +2047,32 @@ def admin_update_user(uid):
         allowed = ["is_admin", "suspended", "can_create_invites", "can_send_messages",
                    "can_upload_files", "keep_all_forever"]
         upd = {k: v for k, v in data.items() if k in allowed}
+
+        # Permission checks
+        if "suspended" in upd and not has_permission(me, "can_suspend_ban_users"):
+            return jsonify({"error": "You don't have permission to suspend users"}), 403
+        if "is_admin" in upd and not has_permission(me, "can_manage_admins"):
+            return jsonify({"error": "You don't have permission to manage admins"}), 403
+
+        # If setting is_admin=true, ensure admin_permissions row exists (default all off)
+        if upd.get("is_admin") is True:
+            try:
+                existing_perms = sb.table("admin_permissions").select("user_id").eq("user_id", uid).execute().data
+                if not existing_perms:
+                    sb.table("admin_permissions").insert({
+                        "user_id": uid,
+                        "granted_by": me["id"]
+                    }).execute()
+            except Exception as e:
+                print(f"[admin perms init] {e}")
+
+        # If demoting to non-admin, remove permissions
+        if upd.get("is_admin") is False:
+            try:
+                sb.table("admin_permissions").delete().eq("user_id", uid).execute()
+            except Exception:
+                pass
+
         if upd:
             sb.table("users").update(upd).eq("id", uid).execute()
             audit("update_user", "user", uid, str(upd))
@@ -1611,7 +2082,7 @@ def admin_update_user(uid):
 
 
 @app.route("/api/admin/user/<uid>/reset_password", methods=["POST"])
-@admin_required
+@permission_required("can_reset_passwords")
 def admin_reset_password(uid):
     try:
         me = current_user()
@@ -1628,7 +2099,7 @@ def admin_reset_password(uid):
 
 
 @app.route("/api/admin/user/<uid>/punish", methods=["POST"])
-@admin_required
+@permission_required("can_suspend_ban_users")
 def admin_punish(uid):
     try:
         me = current_user()
@@ -1660,6 +2131,80 @@ def admin_punish(uid):
         return jsonify({"error": str(e)}), 500
 
 
+# NEW: Improvement I3 — Ban user account (creates a permanent-ban punishment)
+@app.route("/api/admin/user/<uid>/ban_account", methods=["POST"])
+@permission_required("can_suspend_ban_users")
+def admin_ban_account(uid):
+    try:
+        me = current_user()
+        target = sb.table("users").select("*").eq("id", uid).execute().data
+        if target and is_immune(target[0]):
+            return jsonify({"error": "This user is immune"}), 403
+        data = request.json or {}
+        reason = (data.get("reason") or "").strip() or "No reason given"
+        hours = data.get("hours")
+        exp = None
+        if hours:
+            try:
+                exp = (datetime.now(timezone.utc) + timedelta(hours=int(hours))).isoformat()
+            except Exception:
+                pass
+        sb.table("user_punishments").insert({
+            "user_id": uid,
+            "punished_by": session["user_id"],
+            "type": "ban",
+            "reason": reason,
+            "expires_at": exp
+        }).execute()
+        audit("ban_account", "user", uid, reason)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# NEW: Improvement I4 — Owner-only delete other user's account
+@app.route("/api/admin/user/<uid>/delete", methods=["POST"])
+@owner_required
+def owner_delete_user(uid):
+    try:
+        data = request.json or {}
+        target = sb.table("users").select("username,is_owner").eq("id", uid).execute().data
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+        target_user = target[0]
+        expected_confirm = f"DELETE @{target_user['username']}"
+        if data.get("confirm") != expected_confirm:
+            return jsonify({"error": f"You must type '{expected_confirm}' exactly to confirm"}), 400
+        if target_user.get("is_owner"):
+            return jsonify({"error": "Cannot delete the owner account"}), 403
+        if is_immune({"is_owner": False, "username": target_user["username"]}):
+            return jsonify({"error": "Cannot delete immune users. Remove from immunity list first."}), 403
+
+        # Cascade delete
+        sb.table("messages").update({
+            "deleted": True,
+            "content": "[deleted by admin]",
+            "image_url": None
+        }).eq("sender_id", uid).execute()
+        sb.table("conversation_members").delete().eq("user_id", uid).execute()
+        sb.table("recovery_keys").delete().eq("user_id", uid).execute()
+        sb.table("message_reactions").delete().eq("user_id", uid).execute()
+        sb.table("message_reads").delete().eq("user_id", uid).execute()
+        sb.table("typing_status").delete().eq("user_id", uid).execute()
+        sb.table("recent_messages").delete().eq("user_id", uid).execute()
+        sb.table("user_profiles").delete().eq("user_id", uid).execute()
+        sb.table("user_purchases").delete().eq("user_id", uid).execute()
+        sb.table("shard_transactions").delete().eq("user_id", uid).execute()
+        sb.table("terms_acceptance").delete().eq("user_id", uid).execute()
+        sb.table("admin_permissions").delete().eq("user_id", uid).execute()
+        sb.table("users").delete().eq("id", uid).execute()
+
+        audit("delete_user_account", "user", uid, target_user["username"])
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/admin/user/<uid>/punishments")
 @admin_required
 def get_punishments(uid):
@@ -1671,7 +2216,7 @@ def get_punishments(uid):
 
 
 @app.route("/api/admin/punishment/<pid>/remove", methods=["POST"])
-@admin_required
+@permission_required("can_suspend_ban_users")
 def remove_punishment(pid):
     try:
         sb.table("user_punishments").update({"active": False}).eq("id", pid).execute()
@@ -1681,8 +2226,11 @@ def remove_punishment(pid):
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================
+#   ADMIN — IP BANS
+# ============================================================
 @app.route("/api/admin/ban", methods=["POST"])
-@admin_required
+@permission_required("can_ban_ips")
 def admin_ban():
     try:
         data = request.json or {}
@@ -1691,7 +2239,6 @@ def admin_ban():
         if not ip:
             return jsonify({"error": "IP address required"}), 400
 
-        # Check if this IP belongs to an immune user
         try:
             users_at_ip = sb.table("users").select("*").eq("last_ip", ip).execute().data
             for u in users_at_ip:
@@ -1712,7 +2259,7 @@ def admin_ban():
 
 
 @app.route("/api/admin/unban", methods=["POST"])
-@admin_required
+@permission_required("can_ban_ips")
 def admin_unban():
     try:
         ip = ((request.json or {}).get("ip") or "").strip()
@@ -1735,6 +2282,9 @@ def list_bans():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================
+#   ADMIN — GLOBAL SETTINGS
+# ============================================================
 @app.route("/api/admin/settings", methods=["GET", "POST"])
 @admin_required
 def admin_settings_route():
@@ -1742,10 +2292,17 @@ def admin_settings_route():
         if request.method == "GET":
             s = sb.table("admin_settings").select("*").eq("id", 1).execute().data[0]
             return jsonify({"settings": s})
+
+        # POST: only owner or those who can manage things
+        me = current_user()
+        if not me.get("is_owner"):
+            return jsonify({"error": "Only owner can change global settings"}), 403
+
         data = request.json or {}
         allowed = ["site_name", "max_file_size_mb", "default_retention_days",
                    "signups_enabled", "invites_enabled", "invite_creation_mode",
-                   "maintenance_mode", "registration_message"]
+                   "maintenance_mode", "registration_message",
+                   "shards_per_referral", "affiliate_mode"]
         upd = {k: v for k, v in data.items() if k in allowed}
         if upd:
             sb.table("admin_settings").update(upd).eq("id", 1).execute()
@@ -1775,32 +2332,674 @@ def admin_spam_events():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/admin/conversations")
-@admin_required
-def admin_conversations():
+# ============================================================
+#   ADMIN — ADMIN RIGHTS MANAGEMENT (N7, N8 — owner only)
+# ============================================================
+@app.route("/api/admin/admin_rights")
+@owner_required
+def list_admin_rights():
+    """List all admins and their permissions. Owner only."""
     try:
-        convs = sb.table("conversations").select("*").order("updated_at", desc=True).limit(100).execute().data
-        for c in convs:
-            try:
-                members = sb.table("conversation_members").select("users(username)").eq("conversation_id", c["id"]).execute().data
-                c["member_names"] = [m["users"]["username"] for m in members if m.get("users")]
-            except Exception:
-                c["member_names"] = []
+        admins = sb.table("users").select("id,username,is_owner,nickname_color").eq("is_admin", True).order("username").execute().data
+        result = []
+        for a in admins:
+            perms = get_admin_permissions(a["id"])
+            result.append({
+                "id": a["id"],
+                "username": a["username"],
+                "is_owner": a.get("is_owner", False),
+                "nickname_color": a.get("nickname_color") or "#00d9ff",
+                "permissions": {
+                    "can_view_messages": perms.get("can_view_messages", False),
+                    "can_approve_affiliates": perms.get("can_approve_affiliates", False),
+                    "can_create_announcements": perms.get("can_create_announcements", False),
+                    "can_ban_ips": perms.get("can_ban_ips", False),
+                    "can_suspend_ban_users": perms.get("can_suspend_ban_users", False),
+                    "can_reset_passwords": perms.get("can_reset_passwords", False),
+                    "can_manage_shop_items": perms.get("can_manage_shop_items", False),
+                    "can_manage_admins": perms.get("can_manage_admins", False)
+                }
+            })
+        return jsonify({"admins": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/admin_rights/<uid>", methods=["POST"])
+@owner_required
+def update_admin_rights(uid):
+    """Update permissions for an admin. Owner only."""
+    try:
+        data = request.json or {}
+        # Ensure they're an admin
+        u = sb.table("users").select("is_admin,is_owner").eq("id", uid).execute().data
+        if not u or not u[0].get("is_admin"):
+            return jsonify({"error": "User is not an admin"}), 400
+        if u[0].get("is_owner"):
+            return jsonify({"error": "Owner permissions cannot be edited"}), 400
+
+        allowed = ["can_view_messages", "can_approve_affiliates", "can_create_announcements",
+                   "can_ban_ips", "can_suspend_ban_users", "can_reset_passwords",
+                   "can_manage_shop_items", "can_manage_admins"]
+        upd = {k: bool(v) for k, v in data.items() if k in allowed}
+        upd["updated_at"] = now_iso()
+
+        # Ensure a row exists
+        existing = sb.table("admin_permissions").select("user_id").eq("user_id", uid).execute().data
+        if not existing:
+            insert_data = {"user_id": uid, "granted_by": session["user_id"]}
+            insert_data.update(upd)
+            sb.table("admin_permissions").insert(insert_data).execute()
+        else:
+            sb.table("admin_permissions").update(upd).eq("user_id", uid).execute()
+
+        audit("update_admin_rights", "user", uid, str(upd))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+#   EMERGENCY MESSAGE VIEWER (God-Mode)
+# ============================================================
+@app.route("/api/admin/emergency/search")
+@admin_required
+def emergency_search_users():
+    """Search users by username for the emergency viewer."""
+    try:
+        u = current_user()
+        # Owner OR admin with can_view_messages permission
+        if not (u.get("is_owner") or has_permission(u, "can_view_messages")):
+            return jsonify({"error": "You don't have permission for the emergency viewer"}), 403
+
+        q = (request.args.get("q") or "").strip().lower()
+        if len(q) < 1:
+            return jsonify({"users": []})
+        users = sb.table("users").select("id,username,nickname_color,last_seen").ilike("username", f"%{q}%").limit(30).execute().data
+        return jsonify({"users": users})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/emergency/user_conversations/<target_uid>")
+@admin_required
+def emergency_user_conversations(target_uid):
+    """List all conversations a target user is in."""
+    try:
+        u = current_user()
+        if not (u.get("is_owner") or has_permission(u, "can_view_messages")):
+            return jsonify({"error": "Permission denied"}), 403
+
+        mem = sb.table("conversation_members").select("conversation_id,conversations(id,name,is_group,created_at,updated_at)").eq("user_id", target_uid).execute().data
+        convs = []
+        for m in mem:
+            c = m.get("conversations")
+            if c:
+                # Get other members' usernames
+                others = sb.table("conversation_members").select("users(username)").eq("conversation_id", c["id"]).execute().data
+                member_names = [x["users"]["username"] for x in others if x.get("users")]
+                convs.append({
+                    "id": c["id"],
+                    "name": c.get("name"),
+                    "is_group": c.get("is_group", False),
+                    "created_at": c.get("created_at"),
+                    "updated_at": c.get("updated_at"),
+                    "members": member_names
+                })
         return jsonify({"conversations": convs})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/admin/conversation/<cid>/keep", methods=["POST"])
+@app.route("/api/admin/emergency/messages", methods=["POST"])
 @admin_required
-def admin_keep_conv(cid):
+def emergency_view_messages():
+    """View messages in a conversation. Requires reason if admin (not owner)."""
     try:
-        keep = bool((request.json or {}).get("keep_forever", True))
-        sb.table("conversations").update({"keep_forever": keep}).eq("id", cid).execute()
-        if keep:
-            sb.table("messages").update({"expires_at": None}).eq("conversation_id", cid).execute()
-        audit("toggle_keep_forever", "conversation", cid, str(keep))
+        u = current_user()
+        if not (u.get("is_owner") or has_permission(u, "can_view_messages")):
+            return jsonify({"error": "Permission denied"}), 403
+
+        data = request.json or {}
+        cid = (data.get("conversation_id") or "").strip()
+        target_uid = (data.get("target_user_id") or "").strip() or None
+        reason = (data.get("reason") or "").strip()
+
+        if not cid:
+            return jsonify({"error": "Conversation ID required"}), 400
+
+        # If not owner, reason is REQUIRED and min 10 chars
+        if not u.get("is_owner"):
+            if len(reason) < 10:
+                return jsonify({"error": "Reason must be at least 10 characters"}), 400
+
+        # Fetch messages (including deleted ones for emergency review — with anonymous UNMASKED)
+        msgs = sb.table("messages").select("*,users:sender_id(username,nickname_color)").eq("conversation_id", cid).order("created_at").execute().data
+
+        # Emergency viewer sees ALL messages including anonymous ones with real sender info
+        # No anonymization applied here — that's the whole point of emergency access
+
+        # Log the access (only for non-owners)
+        if not u.get("is_owner"):
+            try:
+                sb.table("message_access_log").insert({
+                    "viewer_id": u["id"],
+                    "target_user_id": target_uid,
+                    "conversation_id": cid,
+                    "reason": reason,
+                    "ip": get_ip()
+                }).execute()
+            except Exception as e:
+                print(f"[access log] {e}")
+
+        return jsonify({"messages": msgs, "silent": u.get("is_owner", False)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/emergency/access_log")
+@owner_required
+def emergency_access_log():
+    """Owner-only: view all admin access to messages."""
+    try:
+        logs = sb.table("message_access_log").select("*,viewer:viewer_id(username),target:target_user_id(username)").order("created_at", desc=True).limit(200).execute().data
+        result = []
+        for l in logs:
+            result.append({
+                "id": l["id"],
+                "viewer_username": l.get("viewer", {}).get("username") if l.get("viewer") else "?",
+                "target_username": l.get("target", {}).get("username") if l.get("target") else None,
+                "conversation_id": l.get("conversation_id"),
+                "reason": l.get("reason"),
+                "ip": l.get("ip"),
+                "created_at": l.get("created_at")
+            })
+        return jsonify({"logs": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+#   SHOP
+# ============================================================
+@app.route("/api/shop/items")
+@login_required
+def list_shop_items():
+    """List all enabled shop items."""
+    try:
+        items = sb.table("shop_items").select("*").eq("enabled", True).order("category").order("sort_order").execute().data
+
+        # Get user's purchases to mark as owned
+        uid = session["user_id"]
+        purchases = sb.table("user_purchases").select("item_id,equipped,expires_at").eq("user_id", uid).execute().data
+        purchased_ids = {p["item_id"]: p for p in purchases}
+
+        for item in items:
+            pdata = purchased_ids.get(item["id"])
+            if pdata:
+                item["owned"] = True
+                item["equipped"] = pdata.get("equipped", False)
+                item["expires_at"] = pdata.get("expires_at")
+            else:
+                item["owned"] = False
+                item["equipped"] = False
+                item["expires_at"] = None
+
+        return jsonify({"items": items})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/shop/buy/<item_id>", methods=["POST"])
+@login_required
+def shop_buy(item_id):
+    """Purchase a shop item."""
+    try:
+        uid = session["user_id"]
+        u = current_user()
+
+        # Get item
+        item_res = sb.table("shop_items").select("*").eq("id", item_id).execute().data
+        if not item_res:
+            return jsonify({"error": "Item not found"}), 404
+        item = item_res[0]
+        if not item.get("enabled"):
+            return jsonify({"error": "This item is not available"}), 400
+
+        # Check already owned (only if one-time)
+        existing = sb.table("user_purchases").select("id").eq("user_id", uid).eq("item_id", item_id).execute().data
+        if existing:
+            # For duration-based items, allow rebuying to extend, otherwise reject
+            item_key = item.get("item_key", "")
+            duration_items = ("perk_retention_30_days", "perk_upload_10mb_30_days")
+            if item_key not in duration_items:
+                return jsonify({"error": "You already own this item"}), 400
+
+        # Check balance
+        price = item.get("price", 0) or 0
+        balance = u.get("shards", 0) or 0
+        if balance < price:
+            return jsonify({"error": f"Not enough Shards (need {price}, have {balance})"}), 400
+
+        # Deduct shards
+        new_balance = award_shards(
+            uid,
+            -price,
+            "purchase",
+            f"Bought: {item['name']}",
+            related_table="shop_items",
+            related_id=item["id"]
+        )
+
+        # Determine expiry for duration-based items
+        expires_at = None
+        item_key = item.get("item_key", "")
+        if item_key == "perk_retention_30_days" or item_key == "perk_upload_10mb_30_days":
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+
+        # Record purchase (or update if re-buying duration item)
+        if existing:
+            sb.table("user_purchases").update({
+                "purchased_at": now_iso(),
+                "expires_at": expires_at,
+                "price_paid": price
+            }).eq("id", existing[0]["id"]).execute()
+        else:
+            sb.table("user_purchases").insert({
+                "user_id": uid,
+                "item_id": item_id,
+                "price_paid": price,
+                "expires_at": expires_at
+            }).execute()
+
+        return jsonify({"ok": True, "new_balance": new_balance})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/shop/equip/<item_id>", methods=["POST"])
+@login_required
+def shop_equip(item_id):
+    """Equip or unequip an owned item."""
+    try:
+        uid = session["user_id"]
+        equip = bool((request.json or {}).get("equip", True))
+
+        # Check owned
+        purch = sb.table("user_purchases").select("id,equipped").eq("user_id", uid).eq("item_id", item_id).execute().data
+        if not purch:
+            return jsonify({"error": "You don't own this item"}), 400
+
+        # Get item details
+        item_res = sb.table("shop_items").select("*").eq("id", item_id).execute().data
+        if not item_res:
+            return jsonify({"error": "Item not found"}), 404
+        item = item_res[0]
+        item_key = item.get("item_key", "")
+        category = item.get("category", "")
+        effect_key = item.get("effect_key")
+
+        # Update purchase equipped state
+        sb.table("user_purchases").update({"equipped": equip}).eq("user_id", uid).eq("item_id", item_id).execute()
+
+        # Ensure user_profiles exists
+        ensure_user_profile(uid)
+
+        # Fetch current profile
+        profile_res = sb.table("user_profiles").select("*").eq("user_id", uid).execute().data
+        profile = profile_res[0] if profile_res else {}
+
+        # Handle by category
+        if category == "avatar_effects":
+            # Only one avatar effect at a time — unequip others
+            active_effects = list(profile.get("active_effects", []) or [])
+            # Remove any other effect from same category
+            all_effects = sb.table("shop_items").select("effect_key,id").eq("category", "avatar_effects").execute().data
+            other_effect_keys = [e["effect_key"] for e in all_effects if e["effect_key"] and e["id"] != item_id]
+
+            if equip:
+                # Remove other effects, add this one
+                active_effects = [ek for ek in active_effects if ek not in other_effect_keys]
+                if effect_key and effect_key not in active_effects:
+                    active_effects.append(effect_key)
+                # Also unequip other effect purchases
+                for other in all_effects:
+                    if other["id"] != item_id:
+                        sb.table("user_purchases").update({"equipped": False}).eq("user_id", uid).eq("item_id", other["id"]).execute()
+            else:
+                if effect_key:
+                    active_effects = [ek for ek in active_effects if ek != effect_key]
+
+            sb.table("user_profiles").update({"active_effects": active_effects}).eq("user_id", uid).execute()
+
+        elif category == "badges":
+            active_badges = list(profile.get("active_badges", []) or [])
+            if equip:
+                if effect_key and effect_key not in active_badges:
+                    active_badges.append(effect_key)
+            else:
+                if effect_key:
+                    active_badges = [b for b in active_badges if b != effect_key]
+            sb.table("user_profiles").update({"active_badges": active_badges}).eq("user_id", uid).execute()
+
+        elif category == "chat":
+            # chat_bubble_colors, chat_nickname_font, chat_send_animation
+            if item_key == "chat_bubble_colors":
+                color = (request.json or {}).get("value")
+                new_val = color if (equip and color) else None
+                sb.table("user_profiles").update({"active_bubble_color": new_val}).eq("user_id", uid).execute()
+                sb.table("users").update({"bubble_color": new_val}).eq("id", uid).execute()
+            elif item_key == "chat_nickname_font":
+                font = (request.json or {}).get("value") or "italic"
+                new_val = font if equip else None
+                sb.table("user_profiles").update({"active_nickname_font": new_val}).eq("user_id", uid).execute()
+                sb.table("users").update({"name_font": new_val}).eq("id", uid).execute()
+            elif item_key == "chat_send_animation":
+                anim = (request.json or {}).get("value") or "slide"
+                new_val = anim if equip else None
+                sb.table("user_profiles").update({"active_message_animation": new_val}).eq("user_id", uid).execute()
+                sb.table("users").update({"msg_animation": new_val}).eq("id", uid).execute()
+
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/shop/upload_avatar", methods=["POST"])
+@login_required
+def shop_upload_avatar():
+    """Upload a custom profile picture (requires profile_picture_upload purchase)."""
+    try:
+        uid = session["user_id"]
+
+        # Check ownership
+        owned = sb.table("user_purchases").select("id,shop_items!inner(item_key)").eq("user_id", uid).execute().data
+        has_perk = False
+        for p in owned:
+            item = p.get("shop_items")
+            if item and item.get("item_key") == "profile_picture_upload":
+                has_perk = True
+                break
+        if not has_perk:
+            return jsonify({"error": "You need to buy 'Profile Picture' from the shop first"}), 403
+
+        data = request.json or {}
+        image_data = data.get("image_data")
+        if not image_data:
+            return jsonify({"error": "No image provided"}), 400
+
+        if "," in image_data:
+            image_data = image_data.split(",", 1)[1]
+        img_bytes = base64.b64decode(image_data)
+        if len(img_bytes) > 512 * 1024:
+            return jsonify({"error": "Image too large (max 500KB after compression)"}), 400
+
+        filename = f"{uid}/avatar_{secrets.token_hex(8)}.jpg"
+        sb.storage.from_("cipher-avatars").upload(
+            filename, img_bytes, {"content-type": "image/jpeg"}
+        )
+        url = sb.storage.from_("cipher-avatars").get_public_url(filename)
+
+        ensure_user_profile(uid)
+        sb.table("user_profiles").update({"avatar_url": url}).eq("user_id", uid).execute()
+
+        return jsonify({"ok": True, "avatar_url": url})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+#   SHOP MANAGEMENT (owner + permitted admins)
+# ============================================================
+@app.route("/api/admin/shop/items", methods=["GET"])
+@permission_required("can_manage_shop_items")
+def admin_list_shop_items():
+    try:
+        items = sb.table("shop_items").select("*").order("category").order("sort_order").execute().data
+        return jsonify({"items": items})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/shop/items/<item_id>", methods=["POST"])
+@permission_required("can_manage_shop_items")
+def admin_update_shop_item(item_id):
+    try:
+        data = request.json or {}
+        allowed = ["name", "description", "price", "enabled", "sort_order", "icon"]
+        upd = {k: v for k, v in data.items() if k in allowed}
+        upd["updated_at"] = now_iso()
+        sb.table("shop_items").update(upd).eq("id", item_id).execute()
+        audit("update_shop_item", "shop_item", item_id, str(upd))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+#   AFFILIATE SYSTEM
+# ============================================================
+@app.route("/api/affiliate/my_codes")
+@login_required
+def my_affiliate_codes():
+    try:
+        uid = session["user_id"]
+        codes = sb.table("affiliate_codes").select("*").eq("user_id", uid).order("created_at", desc=True).execute().data
+        return jsonify({"codes": codes})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/affiliate/create", methods=["POST"])
+@login_required
+def create_affiliate_code():
+    try:
+        uid = session["user_id"]
+        u = current_user()
+        data = request.json or {}
+        code = (data.get("code") or "").strip()
+        reason = (data.get("reason") or "").strip()
+
+        # Validate code format (4-20 alphanumeric + underscore)
+        if not re.match(r"^[A-Za-z0-9_]{4,20}$", code):
+            return jsonify({"error": "Code must be 4-20 characters (letters, numbers, underscore)"}), 400
+
+        # Check uniqueness (case-insensitive)
+        existing = sb.table("affiliate_codes").select("id").ilike("code", code).execute().data
+        if existing:
+            return jsonify({"error": "This code is already taken"}), 400
+
+        # Get affiliate mode
+        settings = sb.table("admin_settings").select("affiliate_mode").eq("id", 1).execute().data[0]
+        mode = settings.get("affiliate_mode", "everyone")
+
+        # Determine approval status based on mode
+        if mode == "owner_only" and not u.get("is_owner"):
+            return jsonify({"error": "Only the owner can create affiliate codes right now"}), 403
+
+        if mode == "requires_approval" and not u.get("is_owner"):
+            if len(reason) < 20:
+                return jsonify({"error": "Please provide a reason (at least 20 characters)"}), 400
+            approved = False
+        else:
+            approved = True
+
+        sb.table("affiliate_codes").insert({
+            "user_id": uid,
+            "code": code,
+            "approved": approved,
+            "reason": reason if not approved else None
+        }).execute()
+
+        return jsonify({"ok": True, "approved": approved})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/affiliate/revoke/<code_id>", methods=["POST"])
+@login_required
+def revoke_affiliate_code(code_id):
+    try:
+        uid = session["user_id"]
+        code = sb.table("affiliate_codes").select("user_id").eq("id", code_id).execute().data
+        if not code:
+            return jsonify({"error": "Code not found"}), 404
+        u = current_user()
+        if code[0]["user_id"] != uid and not (u.get("is_owner") or has_permission(u, "can_approve_affiliates")):
+            return jsonify({"error": "Not your code"}), 403
+        sb.table("affiliate_codes").update({
+            "revoked": True,
+            "revoked_at": now_iso()
+        }).eq("id", code_id).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/affiliate/pending")
+@permission_required("can_approve_affiliates")
+def list_pending_affiliates():
+    try:
+        pending = sb.table("affiliate_codes").select("*,users(username)").eq("approved", False).eq("revoked", False).order("created_at", desc=True).execute().data
+        return jsonify({"pending": pending})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/affiliate/<code_id>/approve", methods=["POST"])
+@permission_required("can_approve_affiliates")
+def approve_affiliate(code_id):
+    try:
+        sb.table("affiliate_codes").update({
+            "approved": True,
+            "approved_by": session["user_id"],
+            "approved_at": now_iso()
+        }).eq("id", code_id).execute()
+        audit("approve_affiliate", "affiliate_code", code_id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/affiliate/<code_id>/reject", methods=["POST"])
+@permission_required("can_approve_affiliates")
+def reject_affiliate(code_id):
+    try:
+        reason = ((request.json or {}).get("reason") or "").strip()
+        sb.table("affiliate_codes").update({
+            "rejected_by": session["user_id"],
+            "rejected_at": now_iso(),
+            "rejection_reason": reason
+        }).eq("id", code_id).execute()
+        audit("reject_affiliate", "affiliate_code", code_id, reason)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+#   SHARDS — TRANSACTION HISTORY + LEADERBOARD
+# ============================================================
+@app.route("/api/shards/history")
+@login_required
+def shard_history():
+    try:
+        uid = session["user_id"]
+        tx = sb.table("shard_transactions").select("*").eq("user_id", uid).order("created_at", desc=True).limit(100).execute().data
+        return jsonify({"transactions": tx})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/leaderboard")
+@login_required
+def leaderboard():
+    try:
+        sort = request.args.get("sort", "shards")
+        query = sb.table("users").select("id,username,shards,nickname_color,created_at").eq("leaderboard_opt_out", False)
+
+        if sort == "newest":
+            query = query.order("created_at", desc=True)
+        elif sort == "oldest":
+            query = query.order("created_at")
+        else:
+            query = query.order("shards", desc=True)
+
+        users = query.limit(50).execute().data
+
+        # Enrich with profile data + referral counts
+        for u in users:
+            # Profile
+            try:
+                p = sb.table("user_profiles").select("avatar_url,active_effects,active_badges").eq("user_id", u["id"]).execute().data
+                if p:
+                    u["avatar_url"] = p[0].get("avatar_url")
+                    u["active_effects"] = p[0].get("active_effects", []) or []
+                    u["active_badges"] = p[0].get("active_badges", []) or []
+                else:
+                    u["avatar_url"] = None
+                    u["active_effects"] = []
+                    u["active_badges"] = []
+            except Exception:
+                u["avatar_url"] = None
+                u["active_effects"] = []
+                u["active_badges"] = []
+            # Referral count
+            try:
+                ref = sb.table("affiliate_uses").select("id", count="exact").eq("referrer_id", u["id"]).execute()
+                u["referrals"] = ref.count or 0
+            except Exception:
+                u["referrals"] = 0
+
+        if sort == "referrals":
+            users.sort(key=lambda x: x["referrals"], reverse=True)
+
+        return jsonify({"users": users})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+#   PROFILE CARD (view any user's public profile)
+# ============================================================
+@app.route("/api/profile/<username>")
+@login_required
+def get_public_profile(username):
+    try:
+        username = (username or "").strip().lower()
+        u = sb.table("users").select("id,username,nickname_color,created_at,shards,leaderboard_opt_out").eq("username", username).execute().data
+        if not u:
+            return jsonify({"error": "User not found"}), 404
+        user = u[0]
+
+        # Get profile
+        p = sb.table("user_profiles").select("*").eq("user_id", user["id"]).execute().data
+        profile = p[0] if p else {}
+
+        # Get referral count
+        try:
+            ref = sb.table("affiliate_uses").select("id", count="exact").eq("referrer_id", user["id"]).execute()
+            referrals = ref.count or 0
+        except Exception:
+            referrals = 0
+
+        opted_out = user.get("leaderboard_opt_out", False)
+
+        return jsonify({
+            "user": {
+                "username": user["username"],
+                "nickname_color": user.get("nickname_color") or "#00d9ff",
+                "created_at": user.get("created_at"),
+                "bio": profile.get("bio", ""),
+                "avatar_url": profile.get("avatar_url"),
+                "banner_color": profile.get("banner_color"),
+                "active_effects": profile.get("active_effects", []) or [],
+                "active_badges": profile.get("active_badges", []) or [],
+                "shards": None if opted_out else (user.get("shards", 0) or 0),
+                "referrals": None if opted_out else referrals,
+                "hidden": opted_out
+            }
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1817,10 +3016,10 @@ def cleanup_task():
         sb.table("user_punishments").update({"active": False}).lt("expires_at", now).eq("active", True).execute()
         stale = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
         sb.table("typing_status").delete().lt("started_at", stale).execute()
-        # Clean old recent_messages (keep last 60s for spam detection)
         old_rm = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
         sb.table("recent_messages").delete().lt("created_at", old_rm).execute()
         sb.table("bans").delete().lt("expires_at", now).execute()
+        # Expire duration-based purchases (they stay in DB but frontend checks expires_at)
         print(f"[cleanup] Ran at {now}")
     except Exception as e:
         print(f"[cleanup] {e}")
@@ -1830,139 +3029,6 @@ scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(cleanup_task, "interval", minutes=15, next_run_time=datetime.now())
 scheduler.start()
 
-
-# ============================================================
-#   v1.1 NEW ENDPOINTS (Emergency, Admin Rights, Affiliate, Shop, Leaderboard)
-# ============================================================
-
-# --- Emergency Viewer (N4-N7) ---
-@app.route("/api/admin/emergency/search")
-@admin_required
-def emergency_search():
-    user = current_user()
-    if not user.get("is_owner") and not has_permission(user, "can_view_messages"):
-        return jsonify({"error": "Permission denied"}), 403
-    q = request.args.get("q", "").strip().lower()
-    if len(q) < 2:
-        return jsonify({"users": []})
-    try:
-        users = sb.table("users").select("id,username").ilike("username", f"%{q}%").limit(20).execute().data
-        result = []
-        for u in users:
-            convs = sb.table("conversation_members").select("conversation_id,conversations(name,is_group)").eq("user_id", u["id"]).execute().data
-            result.append({"id": u["id"], "username": u["username"], "conversations": convs})
-        return jsonify({"users": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/admin/emergency/messages/<cid>")
-@admin_required
-def emergency_messages(cid):
-    user = current_user()
-    if not user.get("is_owner") and not has_permission(user, "can_view_messages"):
-        return jsonify({"error": "Permission denied"}), 403
-    reason = request.args.get("reason", "").strip()
-    if not user.get("is_owner"):
-        if len(reason) < 10:
-            return jsonify({"error": "Reason must be at least 10 characters"}), 400
-        try:
-            sb.table("message_access_log").insert({
-                "viewer_id": user["id"], "conversation_id": cid, "reason": reason, "ip_address": get_ip()
-            }).execute()
-        except Exception:
-            pass
-    try:
-        msgs = sb.table("messages").select("*,users:sender_id(username)").eq("conversation_id", cid).eq("deleted", False).order("created_at").execute().data
-        return jsonify({"messages": msgs})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- Admin Rights (N8-N9) ---
-@app.route("/api/admin/permissions")
-@owner_required
-def get_admin_permissions():
-    try:
-        admins = sb.table("users").select("id,username").eq("is_admin", True).execute().data
-        for a in admins:
-            a["permissions"] = get_user_permissions(a["id"])
-        return jsonify({"admins": admins})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/admin/permissions/<uid>", methods=["POST"])
-@owner_required
-def update_admin_permissions(uid):
-    try:
-        data = request.json or {}
-        allowed = ["can_view_messages", "can_approve_affiliates", "can_create_announcements",
-                   "can_ban_ips", "can_suspend_users", "can_reset_passwords", "can_manage_shop"]
-        upd = {k: v for k, v in data.items() if k in allowed}
-        if upd:
-            sb.table("admin_permissions").upsert({"user_id": uid, **upd}).execute()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- Affiliate (N11-N15) ---
-@app.route("/api/affiliate/codes")
-@login_required
-def my_affiliate_codes():
-    uid = session["user_id"]
-    try:
-        codes = sb.table("affiliate_codes").select("*").eq("user_id", uid).execute().data
-        return jsonify({"codes": codes})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/affiliate/create", methods=["POST"])
-@login_required
-def create_affiliate_code():
-    uid = session["user_id"]
-    code = (request.json or {}).get("code", "").strip()
-    if not (4 <= len(code) <= 20) or not code.replace("_", "").isalnum():
-        return jsonify({"error": "Invalid code format"}), 400
-    try:
-        sb.table("affiliate_codes").insert({"user_id": uid, "code": code, "approved": True}).execute()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- Shop (N16-N19) ---
-@app.route("/api/shop/items")
-def shop_items():
-    try:
-        items = sb.table("shop_items").select("*").eq("active", True).execute().data
-        return jsonify({"items": items})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/shop/buy", methods=["POST"])
-@login_required
-def shop_buy():
-    uid = session["user_id"]
-    item_id = (request.json or {}).get("item_id")
-    try:
-        item = sb.table("shop_items").select("*").eq("id", item_id).execute().data[0]
-        user = current_user()
-        if user["shards"] < item["price"]:
-            return jsonify({"error": "Not enough shards"}), 400
-        sb.table("users").update({"shards": user["shards"] - item["price"]}).eq("id", uid).execute()
-        sb.table("user_purchases").insert({"user_id": uid, "item_id": item_id}).execute()
-        sb.table("shard_transactions").insert({
-            "user_id": uid, "amount": -item["price"], "type": "purchase", "description": item["name"]
-        }).execute()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- Leaderboard (N20-N21) ---
-@app.route("/api/leaderboard")
-def leaderboard():
-    try:
-        users = sb.table("users").select("id,username,shards,created_at").eq("leaderboard_opt_out", False).order("shards", desc=True).limit(50).execute().data
-        return jsonify({"users": users})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 # ============================================================
 #   MAIN
