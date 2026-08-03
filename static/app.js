@@ -1,11 +1,10 @@
 /* ============================================================
-   CIPHER v1.0.0 — Frontend
+   CIPHER v1.1.0 — Frontend
    Solo project by Stepundrik
    ============================================================ */
 
 // ==========  STATE  ==========
 let currentUser = null;
-let currentUserShards = 0;
 let currentConv = null;
 let currentConvMeta = null;
 let pollTimer = null;
@@ -20,11 +19,11 @@ let pollConfig = {
   idle_after_cycles: 5,
   very_idle_after_cycles: 20
 };
-let lastMessageHash = '';
 let idleCycles = 0;
 let msgListHash = '';
 let convListHash = '';
 let convListTimer = null;
+let sessionCheckWarnedOnce = false;
 
 // ==========  UTILITIES  ==========
 function esc(s) {
@@ -55,16 +54,28 @@ async function api(url, opts = {}) {
   try {
     const r = await fetch(url, options);
     const j = await r.json().catch(() => ({}));
+
+    // Session enforcement: if backend says logout, force reload
+    if (r.status === 401 || r.status === 403) {
+      if (j.logout || j.suspended || j.banned) {
+        if (!sessionCheckWarnedOnce) {
+          sessionCheckWarnedOnce = true;
+          toast(j.error || 'Session ended', 'error', 5000);
+          setTimeout(() => location.reload(), 1500);
+        }
+      }
+    }
     return { ok: r.ok, status: r.status, data: j };
   } catch (err) {
     return { ok: false, status: 0, data: { error: 'Network error' } };
   }
 }
 
-function showModal(html, wide = false) {
+function showModal(html, wide = false, tall = false) {
   const modal = document.getElementById('modal');
   const bg = document.getElementById('modal-bg');
   modal.classList.toggle('wide', wide);
+  modal.classList.toggle('tall', tall);
   document.getElementById('modal-content').innerHTML = html;
   bg.classList.remove('hidden');
 }
@@ -74,10 +85,18 @@ function closeModal() {
   document.getElementById('modal-content').innerHTML = '';
 }
 
-// Close modal on background click
 document.getElementById('modal-bg').addEventListener('click', (e) => {
   if (e.target.id === 'modal-bg') closeModal();
 });
+
+function showProfileCard(html) {
+  document.getElementById('profile-card-content').innerHTML = html;
+  document.getElementById('profile-card-bg').classList.remove('hidden');
+}
+function closeProfileCard() {
+  document.getElementById('profile-card-bg').classList.add('hidden');
+  document.getElementById('profile-card-content').innerHTML = '';
+}
 
 function updateTheme(hex) {
   if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) hex = '#00d9ff';
@@ -86,13 +105,11 @@ function updateTheme(hex) {
   const b = parseInt(hex.slice(5, 7), 16);
   const root = document.documentElement.style;
   root.setProperty('--accent', hex);
-  // Slightly darker for accent-2
   const darken = v => Math.max(0, Math.floor(v * 0.85));
   const acc2 = `#${darken(r).toString(16).padStart(2, '0')}${darken(g).toString(16).padStart(2, '0')}${darken(b).toString(16).padStart(2, '0')}`;
   root.setProperty('--accent-2', acc2);
   root.setProperty('--accent-glow', `rgba(${r},${g},${b},0.35)`);
   root.setProperty('--accent-soft', `rgba(${r},${g},${b},0.1)`);
-  // Ink = dark version for text on accent background
   const brightness = (r * 299 + g * 587 + b * 114) / 1000;
   root.setProperty('--accent-ink', brightness > 160 ? '#001820' : '#ffffff');
 }
@@ -123,6 +140,34 @@ function formatDayLabel(iso) {
     return d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
   } catch { return ''; }
 }
+function formatDate(iso) {
+  try {
+    return new Date(iso).toLocaleDateString([], { month: 'short', year: 'numeric' });
+  } catch { return ''; }
+}
+
+// Render avatar HTML with effect classes and optional custom image
+function avatarHtml(user, size = 'md') {
+  if (!user) return `<div class="avatar ${size}">?</div>`;
+  const effects = (user.active_effects || []).join(' ');
+  const bgColor = user.nickname_color || '#00d9ff';
+  const style = `background: linear-gradient(135deg, ${bgColor}, #6366f1)`;
+  const letter = (user.username || '?')[0].toUpperCase();
+  if (user.avatar_url) {
+    return `<div class="avatar ${size} ${effects}"><img src="${esc(user.avatar_url)}" alt=""></div>`;
+  }
+  return `<div class="avatar ${size} ${effects}" style="${style}">${esc(letter)}</div>`;
+}
+
+// Render badges HTML
+function badgesHtml(activeBadges) {
+  if (!activeBadges || !activeBadges.length) return '';
+  return activeBadges.map(b => {
+    let cls = b;
+    if (!cls.startsWith('badge-')) cls = 'badge-' + cls;
+    return `<span class="user-badge ${cls}"></span>`;
+  }).join('');
+}
 
 // ==========  AUTH SCREEN  ==========
 function initAuthTabs() {
@@ -132,22 +177,21 @@ function initAuthTabs() {
       tab.classList.add('active');
       const isSignup = tab.dataset.tab === 'signup';
       document.getElementById('invite-field').classList.toggle('hidden', !isSignup);
-    const affiliateField = document.getElementById('affiliate-field');
-    if (affiliateField) affiliateField.classList.toggle('hidden', !isSignup);
-    const tosField = document.getElementById('tos-field');
-    if (tosField) tosField.classList.toggle('hidden', !isSignup);
+      document.getElementById('affiliate-field').classList.toggle('hidden', !isSignup);
+      document.getElementById('tos-field').classList.toggle('hidden', !isSignup);
       document.getElementById('totp-field').classList.add('hidden');
       document.getElementById('auth-submit').textContent = isSignup ? 'Create account' : 'Sign in';
       document.getElementById('auth-error').textContent = '';
     });
   });
 
-  // Auto-fill invite from URL
   const params = new URLSearchParams(window.location.search);
   const inv = params.get('invite');
-  if (inv) {
+  const aff = params.get('affiliate');
+  if (inv || aff) {
     document.querySelector('.tab[data-tab="signup"]').click();
-    document.getElementById('auth-invite').value = inv;
+    if (inv) document.getElementById('auth-invite').value = inv;
+    if (aff) document.getElementById('auth-affiliate').value = aff;
   }
 }
 
@@ -158,16 +202,22 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
   errBox.className = 'form-msg';
 
   const isSignup = document.querySelector('.auth-card .tab.active').dataset.tab === 'signup';
-    const body = {
+
+  if (isSignup && !document.getElementById('auth-tos-check').checked) {
+    errBox.textContent = 'You must accept the Terms of Service';
+    return;
+  }
+
+  const body = {
     username: document.getElementById('auth-username').value.trim(),
     password: document.getElementById('auth-password').value
   };
   if (isSignup) {
     const inv = document.getElementById('auth-invite').value.trim();
+    const aff = document.getElementById('auth-affiliate').value.trim();
     if (inv) body.invite_code = inv;
-    const affiliate = document.getElementById('auth-affiliate')?.value.trim();
-    if (affiliate) body.affiliate_code = affiliate;
-    body.tos_accepted = document.getElementById('tos-checkbox')?.checked || false;
+    if (aff) body.affiliate_code = aff;
+    body.accepted_tos = true;
   } else {
     const totp = document.getElementById('auth-totp').value.trim();
     if (totp) body.totp = totp;
@@ -186,7 +236,6 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
   btn.disabled = false;
   btn.textContent = originalText;
 
-  // 2FA required
   if (!isSignup && res.data.needs_2fa) {
     document.getElementById('totp-field').classList.remove('hidden');
     document.getElementById('auth-totp').focus();
@@ -211,7 +260,7 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
 // ==========  RECOVERY MODAL (after signup)  ==========
 function showRecoveryModal(phrase, key) {
   const html = `
-    <h3>🔐 <span class="accent">Save your recovery info</span></h3>
+    <h3>🔐 Save your <span class="accent">recovery info</span></h3>
     <p>You need both of these to reset your password if you ever lose access. Save them somewhere safe. This is your only chance.</p>
 
     <div class="recovery-box">
@@ -287,10 +336,10 @@ DO NOT SHARE THIS FILE WITH ANYONE.
   toast('Recovery file downloaded', 'success');
 }
 
-// ==========  FORGOT PASSWORD MODAL  ==========
+// ==========  FORGOT PASSWORD  ==========
 function showRecoverModal() {
   const html = `
-    <h3>🔓 <span class="accent">Reset your password</span></h3>
+    <h3>🔓 Reset your <span class="accent">password</span></h3>
     <div class="tabs" style="margin-bottom: 20px;">
       <button class="tab active" onclick="switchRecoverTab(this, 'phrase')" type="button">Recovery phrase</button>
       <button class="tab" onclick="switchRecoverTab(this, 'file')" type="button">Recovery file</button>
@@ -385,10 +434,21 @@ async function doRecover(method) {
   setTimeout(closeModal, 2000);
 }
 
-// ==========  CREDITS MODAL  ==========
+// ==========  ToS MODAL  ==========
+async function showTosModal() {
+  showModal(`
+    <h3>📜 <span class="accent">Terms of Service</span></h3>
+    <div class="tos-content" id="tos-content-body">Loading...</div>
+  `, true);
+  const res = await api('/api/tos');
+  if (res.ok) {
+    document.getElementById('tos-content-body').textContent = res.data.tos || 'Failed to load ToS';
+  }
+}
+
+// ==========  CREDITS MODAL (dynamic color name — B3 fix)  ==========
 function showCreditsModal() {
-  const color = currentUser?.theme_color || '#00d9ff';
-  const colorName = getColorName(color);
+  const colorName = currentUser && currentUser.theme_color_name ? currentUser.theme_color_name : 'cyan';
   showModal(`
     <div class="credits-box">
       <div class="credits-logo">CIPHER</div>
@@ -396,32 +456,14 @@ function showCreditsModal() {
       <div class="credits-line">— A solo project by —</div>
       <div class="credits-name">STEPUNDRIK</div>
       <div class="credits-roles">Backend · Frontend · Design<br>Database · Deployment</div>
-      <div class="credits-line">Made with love and too much ${colorName}.</div>
-      <div class="credits-heart">Built with care.</div>
-      <div class="credits-copy">© 2026 · All rights reserved</div>
+      <div class="credits-line">Private messaging that doesn't stay forever.</div>
+      <div class="credits-heart">Made with love and too much ${esc(colorName)}.</div>
+      <div class="credits-copy">© 2025 · All rights reserved</div>
     </div>
   `);
 }
 
-function getColorName(hex) {
-  const map = {
-    "#00d9ff": "cyan", "#ef4444": "red", "#f59e0b": "orange", "#eab308": "yellow",
-    "#22c55e": "green", "#3b82f6": "blue", "#8b5cf6": "purple", "#ec4899": "pink",
-    "#f43f5e": "rose", "#ffffff": "white", "#000000": "black", "#6b7280": "gray",
-    "#6366f1": "indigo", "#14b8a6": "teal", "#f97316": "orange"
-  };
-  let closest = "cyan", minDist = Infinity;
-  for (const [c, name] of Object.entries(map)) {
-    const dr = parseInt(c.slice(1,3),16) - parseInt(hex.slice(1,3),16);
-    const dg = parseInt(c.slice(3,5),16) - parseInt(hex.slice(3,5),16);
-    const db = parseInt(c.slice(5,7),16) - parseInt(hex.slice(5,7),16);
-    const dist = dr*dr + dg*dg + db*db;
-    if (dist < minDist) { minDist = dist; closest = name; }
-  }
-  return closest;
-}
-
-// ==========  SESSION + ENTER APP  ==========
+// ==========  SESSION CHECK + ENTER APP  ==========
 async function checkSession() {
   const res = await api('/api/me');
   if (res.data.poll_config) pollConfig = res.data.poll_config;
@@ -438,9 +480,23 @@ function enterApp() {
   document.getElementById('my-username').textContent = currentUser.username;
   document.getElementById('empty-username').textContent = currentUser.username;
 
+  // Set avatar with effects
   const av = document.getElementById('me-avatar');
-  av.textContent = currentUser.username[0].toUpperCase();
-  av.style.background = `linear-gradient(135deg, ${currentUser.nickname_color || '#00d9ff'}, #6366f1)`;
+  av.textContent = '';
+  av.className = 'avatar lg';
+  if (currentUser.active_effects && currentUser.active_effects.length) {
+    currentUser.active_effects.forEach(ef => av.classList.add(ef));
+  }
+  if (currentUser.avatar_url) {
+    av.innerHTML = `<img src="${esc(currentUser.avatar_url)}" alt="">`;
+    av.style.background = '';
+  } else {
+    av.textContent = currentUser.username[0].toUpperCase();
+    av.style.background = `linear-gradient(135deg, ${currentUser.nickname_color || '#00d9ff'}, #6366f1)`;
+  }
+
+  // Shards display
+  document.getElementById('shards-count').textContent = (currentUser.shards || 0).toLocaleString();
 
   updateTheme(currentUser.theme_color || '#00d9ff');
 
@@ -452,13 +508,10 @@ function enterApp() {
   startConvListPolling();
   loadAnnouncements();
 
-  // Global paste handler for images in chat
   document.addEventListener('paste', handlePaste);
-  // Drag & drop on messages
   const msgs = document.getElementById('messages');
   msgs.addEventListener('dragover', (e) => { e.preventDefault(); });
   msgs.addEventListener('drop', handleDrop);
-  // Visibility change for polling speed
   document.addEventListener('visibilitychange', () => {
     if (currentConv) restartPollingWithNewInterval();
   });
@@ -477,7 +530,6 @@ async function loadConversations() {
   const list = document.getElementById('conv-list');
   const convs = res.data.conversations || [];
 
-  // Hash check to prevent flicker
   const h = JSON.stringify(convs.map(c => [c.id, c.updated_at, c.muted, c.last_message]));
   if (h === convListHash) return;
   convListHash = h;
@@ -519,7 +571,6 @@ function startConvListPolling() {
   convListTimer = setInterval(loadConversations, 10000);
 }
 
-// ==========  OPEN CONVERSATION  ==========
 function openConversation(conv) {
   currentConv = conv.id;
   currentConvMeta = conv;
@@ -546,7 +597,6 @@ function openConversation(conv) {
 
   document.getElementById('group-info-btn').classList.toggle('hidden', !isGroup);
 
-  // Mute button icon reflects state (we don't have separate icon, just visual color)
   const muteBtn = document.getElementById('mute-btn');
   muteBtn.style.color = conv.muted ? 'var(--warn)' : '';
 
@@ -555,7 +605,7 @@ function openConversation(conv) {
   restartPollingWithNewInterval();
 }
 
-// ==========  POLLING WITH ADAPTIVE INTERVAL  ==========
+// ==========  POLLING  ==========
 function computePollInterval() {
   if (document.hidden) return pollConfig.hidden_ms;
   if (idleCycles >= pollConfig.very_idle_after_cycles) return pollConfig.very_idle_ms;
@@ -573,7 +623,6 @@ function restartPollingWithNewInterval() {
   };
   pollTimer = setTimeout(tick, computePollInterval());
 }
-
 // ==========  MESSAGES  ==========
 async function loadMessages() {
   if (!currentConv) return;
@@ -584,8 +633,7 @@ async function loadMessages() {
   const box = document.getElementById('messages');
   const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 100;
 
-  // Hash to avoid re-render if unchanged
-  const h = JSON.stringify(msgs.map(m => [m.id, m.content, m.image_url, m.reactions, m.read_by, m.deleted]));
+  const h = JSON.stringify(msgs.map(m => [m.id, m.content, m.image_url, m.reactions, m.read_by, m.deleted, m.is_anonymous]));
   if (h === msgListHash) {
     idleCycles++;
   } else {
@@ -594,7 +642,6 @@ async function loadMessages() {
     renderMessages(msgs, box, wasAtBottom);
   }
 
-  // Expiry warning banner
   const warn = document.getElementById('expiry-warning');
   const warnText = document.getElementById('expiry-warning-text');
   const soon = res.data.expiring_soon || 0;
@@ -625,10 +672,17 @@ function renderMessages(msgs, box, keepScroll) {
       lastTime = 0;
     }
 
+    // Anonymous handling: sender_id is null for anonymous messages from others.
+    // For mine detection, we use `is_anonymous` + a heuristic: if sender_id matches current user, it's mine.
+    // But when the backend hides sender_id for anonymous messages from others, we treat them as "theirs".
     const mine = m.sender_id === currentUser.id;
-    const sameSender = m.sender_id === lastSender;
+    const isAnon = m.is_anonymous === true;
+
+    // Group by "sender identity" — anonymous messages don't group with named messages even from same person
+    const senderKey = isAnon ? '_anon_' + (m.id.slice(0, 8)) : (m.sender_id || '_unknown_');
+    const sameSender = senderKey === lastSender;
     const closeInTime = (when.getTime() - lastTime) < 5 * 60 * 1000;
-    const grouped = sameSender && closeInTime;
+    const grouped = sameSender && closeInTime && !isAnon; // never group anonymous
 
     let group;
     if (grouped) {
@@ -637,14 +691,36 @@ function renderMessages(msgs, box, keepScroll) {
       group = document.createElement('div');
       group.className = 'msg-group ' + (mine ? 'mine' : 'theirs');
       if (!mine) {
-        const senderName = m.is_anonymous ? 'Anonymous' : (m.users?.username || 'Unknown');
-        const color = m.users?.nickname_color || '#00d9ff';
-        group.innerHTML = `<div class="msg-sender" style="color: ${esc(color)}">${esc(senderName)}</div>`;
+        let senderName, color, fontClass = '';
+        if (isAnon) {
+          senderName = 'Anonymous';
+          color = 'var(--text-mute)';
+        } else {
+          senderName = m.users?.username || 'Unknown';
+          color = m.users?.nickname_color || '#00d9ff';
+        }
+        const anonTag = isAnon ? ' <span class="anonymous-tag">anon</span>' : '';
+        const senderClass = isAnon ? 'msg-sender anonymous' : 'msg-sender';
+        group.innerHTML = `<div class="${senderClass}" style="color: ${esc(color)}">${esc(senderName)}${anonTag}</div>`;
       }
       box.appendChild(group);
     }
 
-    // Build bubble
+    // Message bubble with optional animation class
+    const bubble = document.createElement('div');
+    let bubbleClass = 'msg';
+    if (mine && currentUser.active_message_animation) {
+      bubbleClass += ' anim-' + currentUser.active_message_animation;
+    }
+    bubble.className = bubbleClass;
+
+    // Apply custom bubble color for mine messages if user has one
+    if (mine && currentUser.active_bubble_color) {
+      bubble.style.background = currentUser.active_bubble_color;
+      bubble.style.color = getContrastColor(currentUser.active_bubble_color);
+      bubble.style.boxShadow = '0 2px 8px ' + currentUser.active_bubble_color + '55';
+    }
+
     let inner = '';
     if (m.image_url) {
       inner += `<img src="${esc(m.image_url)}" class="msg-img" alt="image" onclick="viewImage('${esc(m.image_url)}')">`;
@@ -653,13 +729,15 @@ function renderMessages(msgs, box, keepScroll) {
       const cls = m.image_url ? 'msg-text' : '';
       inner += `<div class="${cls}">${esc(m.content)}</div>`;
     }
-    const bubble = document.createElement('div');
-    bubble.className = 'msg';
     bubble.innerHTML = inner;
     group.appendChild(bubble);
 
-    // Meta (only on last message of group)
-    const isLastOfGroup = (i === msgs.length - 1) || (msgs[i + 1] && (msgs[i + 1].sender_id !== m.sender_id || (new Date(msgs[i + 1].created_at) - when) >= 5 * 60 * 1000));
+    const isLastOfGroup = (i === msgs.length - 1) || (msgs[i + 1] && (
+      (msgs[i + 1].is_anonymous ? '_anon_' + msgs[i + 1].id.slice(0, 8) : (msgs[i + 1].sender_id || '_unknown_')) !== senderKey ||
+      (new Date(msgs[i + 1].created_at) - when) >= 5 * 60 * 1000 ||
+      isAnon
+    ));
+
     if (isLastOfGroup) {
       const meta = document.createElement('div');
       meta.className = 'msg-meta';
@@ -672,7 +750,6 @@ function renderMessages(msgs, box, keepScroll) {
       group.appendChild(meta);
     }
 
-    // Reactions
     if (m.reactions && m.reactions.length > 0) {
       const counts = {};
       m.reactions.forEach(r => {
@@ -688,11 +765,32 @@ function renderMessages(msgs, box, keepScroll) {
       group.appendChild(rw);
     }
 
-    lastSender = m.sender_id;
+    // Add click handler to sender name to open profile card (non-anonymous only)
+    if (!mine && !isAnon && m.users?.username) {
+      const senderEl = group.querySelector('.msg-sender');
+      if (senderEl && !senderEl.dataset.hooked) {
+        senderEl.style.cursor = 'pointer';
+        senderEl.dataset.hooked = '1';
+        senderEl.addEventListener('click', () => showUserProfile(m.users.username));
+      }
+    }
+
+    lastSender = senderKey;
     lastTime = when.getTime();
   });
 
   if (keepScroll) box.scrollTop = box.scrollHeight;
+}
+
+function getContrastColor(hex) {
+  if (!hex || !hex.startsWith('#')) return '#fff';
+  try {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+    return brightness > 160 ? '#001820' : '#ffffff';
+  } catch { return '#fff'; }
 }
 
 async function toggleReaction(msgId, emoji) {
@@ -706,7 +804,7 @@ function viewImage(url) {
   document.getElementById('img-viewer').classList.remove('hidden');
 }
 
-// ==========  EMOJI PICKER (viewport-safe)  ==========
+// ==========  EMOJI PICKER  ==========
 function showEmojiPicker(evt, msgId) {
   evt.stopPropagation();
   document.querySelectorAll('.emoji-picker').forEach(x => x.remove());
@@ -727,7 +825,6 @@ function showEmojiPicker(evt, msgId) {
   });
   document.body.appendChild(picker);
 
-  // Position with viewport clamping
   const rect = evt.target.getBoundingClientRect();
   const pw = picker.offsetWidth;
   const ph = picker.offsetHeight;
@@ -773,7 +870,6 @@ document.getElementById('msg-form').addEventListener('submit', async (e) => {
   }
   if (!res.ok) {
     toast(res.data.error || 'Failed to send', 'error');
-    // Restore input
     input.value = content;
     if (imgToSend) pendingImage = imgToSend;
     return;
@@ -790,7 +886,7 @@ document.getElementById('msg-form').addEventListener('submit', async (e) => {
   loadMessages();
 });
 
-// ==========  TYPING INDICATOR  ==========
+// ==========  TYPING  ==========
 document.getElementById('msg-input').addEventListener('input', () => {
   if (!currentConv) return;
   const now = Date.now();
@@ -837,22 +933,21 @@ async function handleImageFile(file) {
   }
 }
 
-function compressImage(file) {
+function compressImage(file, maxDim = 1200, quality = 0.7) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const img = new Image();
       img.onload = () => {
-        const MAX = 1200;
         let w = img.width, h = img.height;
-        if (w > MAX || h > MAX) {
-          if (w > h) { h = h * (MAX / w); w = MAX; }
-          else { w = w * (MAX / h); h = MAX; }
+        if (w > maxDim || h > maxDim) {
+          if (w > h) { h = h * (maxDim / w); w = maxDim; }
+          else { w = w * (maxDim / h); h = maxDim; }
         }
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.7));
+        resolve(canvas.toDataURL('image/jpeg', quality));
       };
       img.onerror = () => reject(new Error('Bad image'));
       img.src = e.target.result;
@@ -917,6 +1012,7 @@ function leaveCurrent() {
     <button class="btn secondary" style="margin-top: 8px;" onclick="closeModal()">Cancel</button>
   `);
 }
+
 async function confirmLeave() {
   const cid = currentConv;
   await api(`/api/conversations/${cid}/leave`, { method: 'POST' });
@@ -961,7 +1057,7 @@ function showGroupInfo() {
   const memberRows = c.members.map(m => `
     <tr>
       <td>
-        <span style="color: ${esc(m.nickname_color)}; font-weight: 500;">${esc(m.username)}</span>
+        <span style="color: ${esc(m.nickname_color)}; font-weight: 500; cursor: pointer;" onclick="showUserProfile('${esc(m.username)}')">${esc(m.username)}</span>
         ${m.is_group_admin ? '<span class="badge admin">Admin</span>' : ''}
       </td>
       <td style="text-align: right;">
@@ -1012,7 +1108,6 @@ async function addGroupMember() {
   const res = await api(`/api/conversations/${currentConv}/add_member`, { method: 'POST', body: { username } });
   if (res.ok) {
     toast('Member added', 'success');
-    // Reload conversation
     const cRes = await api('/api/conversations');
     const updated = (cRes.data.conversations || []).find(c => c.id === currentConv);
     if (updated) { currentConvMeta = updated; showGroupInfo(); }
@@ -1020,7 +1115,15 @@ async function addGroupMember() {
 }
 
 async function removeGroupMember(uid, username) {
-  if (!confirm(`Remove ${username} from group?`)) return;
+  showModal(`
+    <h3>Remove <span class="accent">${esc(username)}</span>?</h3>
+    <p>They will no longer see messages in this group.</p>
+    <button class="btn danger" onclick="confirmRemoveMember('${uid}')">Remove ${esc(username)}</button>
+    <button class="btn secondary" style="margin-top: 8px;" onclick="showGroupInfo()">Cancel</button>
+  `);
+}
+
+async function confirmRemoveMember(uid) {
   const res = await api(`/api/conversations/${currentConv}/remove_member`, { method: 'POST', body: { user_id: uid } });
   if (res.ok) {
     toast('Member removed', 'success');
@@ -1051,7 +1154,6 @@ async function createDM() {
   }
   closeModal();
   await loadConversations();
-  // Find and open it
   const cRes = await api('/api/conversations');
   const conv = (cRes.data.conversations || []).find(c => c.id === res.data.conversation_id);
   if (conv) openConversation(conv);
@@ -1110,15 +1212,18 @@ document.getElementById('search-btn').addEventListener('click', () => {
         box.innerHTML = '<p style="text-align:center; color:var(--text-mute); padding:20px;">No results</p>';
         return;
       }
-      box.innerHTML = results.map(r => `
-        <div class="search-result" onclick='openFromSearch("${r.conversation_id}")'>
-          <div class="search-result-meta">
-            <span class="search-result-user">${esc(r.users?.username || 'unknown')}</span>
-            <span class="search-result-time">${new Date(r.created_at).toLocaleString()}</span>
+      box.innerHTML = results.map(r => {
+        const senderName = r.is_anonymous ? 'Anonymous' : (r.users?.username || 'unknown');
+        return `
+          <div class="search-result" onclick='openFromSearch("${r.conversation_id}")'>
+            <div class="search-result-meta">
+              <span class="search-result-user">${esc(senderName)}</span>
+              <span class="search-result-time">${new Date(r.created_at).toLocaleString()}</span>
+            </div>
+            <div class="search-result-content">${esc((r.content || '').slice(0, 150))}</div>
           </div>
-          <div class="search-result-content">${esc((r.content || '').slice(0, 150))}</div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
     }, 300);
   });
 });
@@ -1181,14 +1286,13 @@ async function revokeInvite(id) {
   toast('Invite revoked', 'success');
   showInvitesModal();
 }
-
-// ==========  SETTINGS  ==========
+// ==========  SETTINGS MODAL  ==========
 document.getElementById('settings-btn').addEventListener('click', showSettingsModal);
 
 function showSettingsModal() {
   const u = currentUser;
   showModal(`
-    <h3>⚙️ <span class="accent">Your settings</span></h3>
+    <h3>⚙️ Your <span class="accent">settings</span></h3>
 
     <h4>Appearance</h4>
     <div class="color-row">
@@ -1204,7 +1308,7 @@ function showSettingsModal() {
     <div class="setting-row">
       <div class="setting-info">
         <div class="setting-label">Anonymous mode</div>
-        <div class="setting-desc">Hide your name on new messages</div>
+        <div class="setting-desc">Hide your name on new messages (recipients see "Anonymous")</div>
       </div>
       <input type="checkbox" id="s-anon" ${u.anonymous_mode ? 'checked' : ''}>
     </div>
@@ -1222,6 +1326,20 @@ function showSettingsModal() {
       </div>
       <input type="checkbox" id="s-notify" ${u.notify_before_delete ? 'checked' : ''}>
     </div>
+    <div class="setting-row">
+      <div class="setting-info">
+        <div class="setting-label">Hide me from leaderboard</div>
+        <div class="setting-desc">You won't appear in public rankings</div>
+      </div>
+      <input type="checkbox" id="s-lb" ${u.leaderboard_opt_out ? 'checked' : ''}>
+    </div>
+
+    <h4>Profile</h4>
+    <div class="field">
+      <label>Bio</label>
+      <textarea id="s-bio" rows="2" maxlength="160" placeholder="Tell people about you (max 160 chars)">${esc(u.bio || '')}</textarea>
+    </div>
+
     <button class="btn primary" style="margin-top: 12px;" onclick="saveSettings()">Save changes</button>
 
     <h4>Security</h4>
@@ -1231,9 +1349,17 @@ function showSettingsModal() {
       : `<button class="btn secondary" onclick="showEnable2FAModal()">Enable 2FA (Authenticator App)</button>`
     }
 
-    <h4>Danger zone</h4>
-    <button class="btn danger" onclick="showDeleteAccountModal()">Delete my account</button>
-  `);
+    <h4>Legal</h4>
+    <button class="btn secondary" onclick="showTosModal()">Read Terms of Service</button>
+
+    ${!u.is_owner ? `
+      <h4>Danger zone</h4>
+      <button class="btn danger" onclick="showDeleteAccountModal()">Delete my account</button>
+    ` : `
+      <h4>Owner note</h4>
+      <p style="color: var(--text-mute); font-size: 12px;">The owner account cannot be deleted from within the app.</p>
+    `}
+  `, false, true);
 }
 
 async function saveSettings() {
@@ -1242,23 +1368,51 @@ async function saveSettings() {
     theme_color: document.getElementById('s-theme').value,
     anonymous_mode: document.getElementById('s-anon').checked,
     keep_all_forever: document.getElementById('s-keep').checked,
-    notify_before_delete: document.getElementById('s-notify').checked
+    notify_before_delete: document.getElementById('s-notify').checked,
+    leaderboard_opt_out: document.getElementById('s-lb').checked,
+    bio: document.getElementById('s-bio').value
   };
   const res = await api('/api/profile', { method: 'POST', body });
   if (!res.ok) return toast('Save failed', 'error');
   Object.assign(currentUser, body);
+  // Update theme color name for credits joke
+  currentUser.theme_color_name = getColorNameClient(body.theme_color);
   updateTheme(body.theme_color);
+  // Update me-avatar background
   const av = document.getElementById('me-avatar');
-  av.style.background = `linear-gradient(135deg, ${body.nickname_color}, #6366f1)`;
+  if (!currentUser.avatar_url) {
+    av.style.background = `linear-gradient(135deg, ${body.nickname_color}, #6366f1)`;
+  }
   toast('Settings saved', 'success');
   closeModal();
   convListHash = '';
   loadConversations();
 }
 
+// Local color name mapping (matches backend)
+function getColorNameClient(hex) {
+  const colors = {
+    'cyan': [0, 217, 255], 'red': [239, 68, 68], 'orange': [245, 158, 11],
+    'yellow': [234, 179, 8], 'green': [34, 197, 94], 'blue': [59, 130, 246],
+    'purple': [139, 92, 246], 'pink': [236, 72, 153], 'rose': [244, 63, 94],
+    'white': [255, 255, 255], 'black': [0, 0, 0], 'gray': [107, 114, 128],
+    'indigo': [99, 102, 241], 'teal': [20, 184, 166]
+  };
+  if (!hex || !/^#[0-9a-f]{6}$/i.test(hex)) return 'cyan';
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  let best = 'cyan', bestD = Infinity;
+  Object.entries(colors).forEach(([name, [cr, cg, cb]]) => {
+    const d = (cr-r)**2 + (cg-g)**2 + (cb-b)**2;
+    if (d < bestD) { bestD = d; best = name; }
+  });
+  return best;
+}
+
 function showChangePasswordModal() {
   showModal(`
-    <h3>🔑 <span class="accent">Change password</span></h3>
+    <h3>🔑 Change <span class="accent">password</span></h3>
     <div class="field"><label>Current password</label><input type="password" id="cp-old"></div>
     <div class="field"><label>New password (6+ chars)</label><input type="password" id="cp-new"></div>
     <button class="btn primary" onclick="doChangePassword()">Update password</button>
@@ -1285,7 +1439,7 @@ async function showEnable2FAModal() {
   const res = await api('/api/2fa/setup', { method: 'POST' });
   if (!res.ok) return toast(res.data.error, 'error');
   showModal(`
-    <h3>🔐 <span class="accent">Enable 2FA</span></h3>
+    <h3>🔐 Enable <span class="accent">2FA</span></h3>
     <p>1. Scan this QR code with Google Authenticator, Authy, or any TOTP app.</p>
     <div class="qr-wrap">
       <img src="${res.data.qr}">
@@ -1335,8 +1489,9 @@ function showDeleteAccountModal() {
     <p><b>This will permanently delete:</b></p>
     <ul style="color: var(--text-dim); margin: 10px 0 16px 20px; font-size: 13px; line-height: 1.8;">
       <li>Your account and profile</li>
-      <li>All your messages (marked as deleted)</li>
-      <li>All your conversations you're alone in</li>
+      <li>All your Shards and purchases</li>
+      <li>All your affiliate codes</li>
+      <li>Your messages (marked as deleted)</li>
       <li>Your recovery keys</li>
     </ul>
     <p style="color: var(--danger);">This cannot be undone.</p>
@@ -1353,36 +1508,440 @@ async function doDeleteAccount() {
   setTimeout(() => location.reload(), 1500);
 }
 
+// ==========  MY PROFILE (from sidebar button)  ==========
+document.getElementById('profile-btn').addEventListener('click', () => {
+  showUserProfile(currentUser.username);
+});
+
+// ==========  SHARDS HISTORY  ==========
+function showShardsModal() {
+  api('/api/shards/history').then(res => {
+    const tx = res.data.transactions || [];
+    const rows = tx.map(t => {
+      const positive = t.amount >= 0;
+      return `
+        <div class="tx-row">
+          <div class="tx-desc">${esc(t.description || t.transaction_type)}</div>
+          <div class="tx-time">${new Date(t.created_at).toLocaleDateString()}</div>
+          <div class="tx-amount ${positive ? 'positive' : 'negative'}">${positive ? '+' : ''}${t.amount}</div>
+        </div>
+      `;
+    }).join('');
+    showModal(`
+      <h3>💎 <span class="accent">Shard history</span></h3>
+      <div class="shop-header">
+        <div class="shop-balance">💎 ${(currentUser.shards || 0).toLocaleString()}</div>
+        <span style="color: var(--text-dim); font-size: 12px;">Current balance</span>
+      </div>
+      ${rows || '<p style="text-align: center; color: var(--text-mute); padding: 20px;">No transactions yet</p>'}
+    `);
+  });
+}
+
+// ==========  SHOP  ==========
+let currentShopCategory = 'profile';
+let shopItemsCache = [];
+
+document.getElementById('shop-btn').addEventListener('click', showShopModal);
+
+async function showShopModal() {
+  const res = await api('/api/shop/items');
+  shopItemsCache = res.data.items || [];
+  renderShopModal();
+}
+
+function renderShopModal() {
+  const categories = [
+    { key: 'profile', label: 'Profile' },
+    { key: 'avatar_effects', label: 'Effects' },
+    { key: 'chat', label: 'Chat' },
+    { key: 'badges', label: 'Badges' },
+    { key: 'perks', label: 'Perks' }
+  ];
+  const catButtons = categories.map(c =>
+    `<button class="shop-cat ${c.key === currentShopCategory ? 'active' : ''}" onclick="switchShopCat('${c.key}')">${c.label}</button>`
+  ).join('');
+
+  const items = shopItemsCache.filter(i => i.category === currentShopCategory);
+  const cards = items.map(item => renderShopItem(item)).join('');
+
+  showModal(`
+    <h3>🛒 <span class="accent">Shop</span></h3>
+    <div class="shop-header">
+      <div class="shop-balance">💎 ${(currentUser.shards || 0).toLocaleString()}</div>
+      <span style="color: var(--text-dim); font-size: 12px;">Your Shards</span>
+    </div>
+    <div class="shop-categories">${catButtons}</div>
+    <div class="shop-grid">${cards || '<p style="grid-column: 1/-1; text-align: center; color: var(--text-mute); padding: 20px;">No items in this category</p>'}</div>
+  `, true, true);
+}
+
+function switchShopCat(cat) {
+  currentShopCategory = cat;
+  renderShopModal();
+}
+
+function renderShopItem(item) {
+  const owned = item.owned;
+  const equipped = item.equipped;
+  const canAfford = (currentUser.shards || 0) >= item.price;
+  const isPerk = item.category === 'perks';
+  const isCosmeticEquippable = ['avatar_effects', 'badges', 'chat'].includes(item.category);
+
+  let badge = '';
+  if (equipped) badge = '<div class="shop-badge-equipped">Equipped</div>';
+  else if (owned) badge = '<div class="shop-badge-owned">Owned</div>';
+
+  let footerBtn = '';
+  if (owned && isCosmeticEquippable) {
+    // Special handling for chat items with options
+    if (item.item_key === 'chat_nickname_font') {
+      footerBtn = `
+        <select onchange="equipChatOption('${item.id}', 'chat_nickname_font', this.value)" style="width: auto; padding: 4px 8px; margin: 0; font-size: 12px;">
+          <option value="">— None —</option>
+          <option value="italic" ${currentUser.active_nickname_font === 'italic' ? 'selected' : ''}>Italic</option>
+          <option value="bold" ${currentUser.active_nickname_font === 'bold' ? 'selected' : ''}>Bold</option>
+          <option value="mono" ${currentUser.active_nickname_font === 'mono' ? 'selected' : ''}>Monospace</option>
+        </select>
+      `;
+    } else if (item.item_key === 'chat_send_animation') {
+      footerBtn = `
+        <select onchange="equipChatOption('${item.id}', 'chat_send_animation', this.value)" style="width: auto; padding: 4px 8px; margin: 0; font-size: 12px;">
+          <option value="">— None —</option>
+          <option value="slide" ${currentUser.active_message_animation === 'slide' ? 'selected' : ''}>Slide</option>
+          <option value="fade" ${currentUser.active_message_animation === 'fade' ? 'selected' : ''}>Fade</option>
+          <option value="bounce" ${currentUser.active_message_animation === 'bounce' ? 'selected' : ''}>Bounce</option>
+        </select>
+      `;
+    } else if (item.item_key === 'chat_bubble_colors') {
+      footerBtn = `
+        <input type="color" onchange="equipChatOption('${item.id}', 'chat_bubble_colors', this.value)" value="${esc(currentUser.active_bubble_color || '#00d9ff')}" style="width: 40px; height: 32px; padding: 2px; margin: 0;">
+      `;
+    } else {
+      footerBtn = `<button class="btn-mini ${equipped ? 'ghost' : 'success'}" onclick="equipItem('${item.id}', ${!equipped})">${equipped ? 'Unequip' : 'Equip'}</button>`;
+    }
+  } else if (owned && item.item_key === 'profile_picture_upload') {
+    footerBtn = `<button class="btn-mini success" onclick="uploadAvatarFlow()">Upload avatar</button>`;
+  } else if (owned && item.item_key === 'profile_bio') {
+    footerBtn = `<button class="btn-mini ghost" onclick="closeModal(); showSettingsModal();">Edit bio</button>`;
+  } else if (owned && !isPerk) {
+    footerBtn = `<span style="color: var(--success); font-size: 11px;">Owned</span>`;
+  } else if (owned && isPerk) {
+    footerBtn = `<button class="btn-mini ${canAfford ? '' : 'ghost'}" ${canAfford ? '' : 'disabled'} onclick="buyItem('${item.id}')">Renew</button>`;
+  } else {
+    footerBtn = `<button class="btn-mini ${canAfford ? '' : 'ghost'}" ${canAfford ? '' : 'disabled'} onclick="buyItem('${item.id}')">Buy</button>`;
+  }
+
+  return `
+    <div class="shop-item ${owned ? 'owned' : ''} ${equipped ? 'equipped' : ''}">
+      ${badge}
+      <div class="shop-item-icon">${esc(item.icon || '💎')}</div>
+      <div class="shop-item-name">${esc(item.name)}</div>
+      <div class="shop-item-desc">${esc(item.description || '')}</div>
+      <div class="shop-item-footer">
+        <div class="shop-item-price">💎 ${item.price}</div>
+        ${footerBtn}
+      </div>
+    </div>
+  `;
+}
+
+async function buyItem(itemId) {
+  const res = await api(`/api/shop/buy/${itemId}`, { method: 'POST' });
+  if (!res.ok) return toast(res.data.error || 'Purchase failed', 'error');
+  toast('Purchased! 💎', 'success');
+  if (typeof res.data.new_balance === 'number') {
+    currentUser.shards = res.data.new_balance;
+    document.getElementById('shards-count').textContent = res.data.new_balance.toLocaleString();
+  }
+  // Refresh shop
+  const r = await api('/api/shop/items');
+  shopItemsCache = r.data.items || [];
+  renderShopModal();
+}
+
+async function equipItem(itemId, equip) {
+  const res = await api(`/api/shop/equip/${itemId}`, { method: 'POST', body: { equip } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  toast(equip ? 'Equipped' : 'Unequipped', 'success');
+  // Refresh user to get updated effects/badges
+  await refreshCurrentUser();
+  // Refresh shop
+  const r = await api('/api/shop/items');
+  shopItemsCache = r.data.items || [];
+  renderShopModal();
+}
+
+async function equipChatOption(itemId, itemKey, value) {
+  const res = await api(`/api/shop/equip/${itemId}`, { method: 'POST', body: { equip: !!value, value } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  await refreshCurrentUser();
+  toast('Applied', 'success');
+}
+
+async function refreshCurrentUser() {
+  const res = await api('/api/me');
+  if (res.data.user) {
+    currentUser = res.data.user;
+    // Update me-avatar effects
+    const av = document.getElementById('me-avatar');
+    av.className = 'avatar lg';
+    (currentUser.active_effects || []).forEach(ef => av.classList.add(ef));
+    if (currentUser.avatar_url) {
+      av.innerHTML = `<img src="${esc(currentUser.avatar_url)}" alt="">`;
+      av.style.background = '';
+    } else {
+      av.innerHTML = '';
+      av.textContent = currentUser.username[0].toUpperCase();
+      av.style.background = `linear-gradient(135deg, ${currentUser.nickname_color || '#00d9ff'}, #6366f1)`;
+    }
+    document.getElementById('shards-count').textContent = (currentUser.shards || 0).toLocaleString();
+    msgListHash = ''; // force re-render to apply new bubble color/animation
+  }
+}
+
+function uploadAvatarFlow() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (!f.type.startsWith('image/')) return toast('Only images', 'error');
+    toast('Uploading...', 'info');
+    try {
+      const compressed = await compressImage(f, 400, 0.75);
+      const res = await api('/api/shop/upload_avatar', { method: 'POST', body: { image_data: compressed } });
+      if (!res.ok) return toast(res.data.error || 'Upload failed', 'error');
+      currentUser.avatar_url = res.data.avatar_url;
+      const av = document.getElementById('me-avatar');
+      av.innerHTML = `<img src="${esc(res.data.avatar_url)}" alt="">`;
+      av.style.background = '';
+      toast('Avatar updated!', 'success');
+      const r = await api('/api/shop/items');
+      shopItemsCache = r.data.items || [];
+      renderShopModal();
+    } catch (err) {
+      toast('Failed to process image', 'error');
+    }
+  };
+  input.click();
+}
+
+// ==========  AFFILIATE  ==========
+document.getElementById('affiliate-btn').addEventListener('click', showAffiliateModal);
+
+async function showAffiliateModal() {
+  const res = await api('/api/affiliate/my_codes');
+  const codes = res.data.codes || [];
+  const totalEarned = codes.reduce((sum, c) => sum + (c.total_earned || 0), 0);
+
+  const codeCards = codes.map(c => {
+    let statusPill = '';
+    if (c.revoked) statusPill = '<span class="affiliate-code-status aff-status-revoked">Revoked</span>';
+    else if (c.rejected_at) statusPill = '<span class="affiliate-code-status aff-status-rejected">Rejected</span>';
+    else if (c.approved) statusPill = '<span class="affiliate-code-status aff-status-active">Active</span>';
+    else statusPill = '<span class="affiliate-code-status aff-status-pending">Pending</span>';
+    return `
+      <div class="affiliate-code-card">
+        <div>
+          <span class="affiliate-code-key">${esc(c.code)}</span>${statusPill}
+          <div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">
+            ${c.uses || 0} uses · ${c.total_earned || 0} 💎 earned
+          </div>
+        </div>
+        <div>
+          ${c.approved && !c.revoked ? `<button class="btn-mini ghost" onclick="copyAffCode('${esc(c.code)}')">Copy link</button>` : ''}
+          ${!c.revoked ? `<button class="btn-mini danger" onclick="revokeAffCode('${c.id}')">Revoke</button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  showModal(`
+    <h3>🤝 <span class="accent">Affiliate program</span></h3>
+    <div class="shop-header">
+      <div>
+        <div style="font-family: 'JetBrains Mono', monospace; color: var(--shard); font-weight: 700; font-size: 18px;">💎 ${totalEarned}</div>
+        <div style="color: var(--text-mute); font-size: 11px;">Total earned from referrals</div>
+      </div>
+      <button class="btn primary" style="width: auto; padding: 10px 16px;" onclick="showCreateAffModal()">Create code</button>
+    </div>
+    ${codeCards || '<p style="text-align: center; color: var(--text-mute); padding: 20px;">No affiliate codes yet. Create one to start earning Shards!</p>'}
+  `);
+}
+
+function showCreateAffModal() {
+  showModal(`
+    <h3>Create <span class="accent">affiliate code</span></h3>
+    <p>Choose a memorable code. Friends who sign up with it earn you Shards.</p>
+    <div class="field">
+      <label>Code (4-20 chars, letters/numbers/underscore)</label>
+      <input type="text" id="aff-code" maxlength="20" placeholder="MYCODE" autofocus>
+    </div>
+    <div class="field">
+      <label>Reason (required if approval needed)</label>
+      <textarea id="aff-reason" rows="2" maxlength="200" placeholder="Why do you want this code?"></textarea>
+    </div>
+    <button class="btn primary" onclick="doCreateAff()">Create</button>
+    <p id="aff-msg" class="form-msg"></p>
+  `);
+}
+
+async function doCreateAff() {
+  const code = document.getElementById('aff-code').value.trim();
+  const reason = document.getElementById('aff-reason').value.trim();
+  if (!code) return document.getElementById('aff-msg').textContent = 'Code required';
+  const res = await api('/api/affiliate/create', { method: 'POST', body: { code, reason } });
+  if (!res.ok) return document.getElementById('aff-msg').textContent = res.data.error || 'Failed';
+  if (res.data.approved) {
+    toast('Affiliate code active!', 'success');
+  } else {
+    toast('Submitted for approval', 'info');
+  }
+  closeModal();
+  setTimeout(showAffiliateModal, 300);
+}
+
+function copyAffCode(code) {
+  const url = window.location.origin + '/?affiliate=' + code;
+  copyText(url);
+}
+
+async function revokeAffCode(id) {
+  const res = await api(`/api/affiliate/revoke/${id}`, { method: 'POST' });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  toast('Revoked', 'success');
+  showAffiliateModal();
+}
+
+// ==========  LEADERBOARD  ==========
+let leaderboardSort = 'shards';
+document.getElementById('leaderboard-btn').addEventListener('click', () => {
+  leaderboardSort = 'shards';
+  showLeaderboardModal();
+});
+
+async function showLeaderboardModal() {
+  const res = await api('/api/leaderboard?sort=' + leaderboardSort);
+  const users = res.data.users || [];
+  const rows = users.map((u, i) => {
+    const rank = i + 1;
+    const rankClass = rank <= 3 ? `rank-${rank}` : '';
+    return `
+      <div class="lb-row">
+        <div class="lb-rank ${rankClass}">${rank}</div>
+        ${avatarHtml(u, 'sm')}
+        <div class="lb-user">
+          <div class="lb-username" onclick="showUserProfile('${esc(u.username)}')" style="color: ${esc(u.nickname_color || '#00d9ff')}">${esc(u.username)}</div>
+          <div class="lb-badges">${badgesHtml(u.active_badges)}</div>
+        </div>
+        <div class="lb-shards">💎 ${(u.shards || 0).toLocaleString()}</div>
+        <div class="lb-refs">${u.referrals || 0} refs</div>
+      </div>
+    `;
+  }).join('');
+
+  const sortBtn = (key, label) =>
+    `<button class="btn-mini ${leaderboardSort === key ? 'active' : 'ghost'}" onclick="changeLbSort('${key}')">${label}</button>`;
+
+  showModal(`
+    <h3>🏆 <span class="accent">Leaderboard</span></h3>
+    <div class="lb-sort">
+      ${sortBtn('shards', 'Most Shards')}
+      ${sortBtn('referrals', 'Most Referrals')}
+      ${sortBtn('newest', 'Newest')}
+      ${sortBtn('oldest', 'Oldest')}
+    </div>
+    ${rows || '<p style="text-align: center; color: var(--text-mute); padding: 20px;">No users to show</p>'}
+    ${currentUser.leaderboard_opt_out ? '<p style="text-align: center; color: var(--text-mute); font-size: 11px; margin-top: 16px;">You are hidden from the leaderboard. Change in Settings to compete.</p>' : ''}
+  `, true, true);
+}
+
+function changeLbSort(sort) {
+  leaderboardSort = sort;
+  showLeaderboardModal();
+}
+
+// ==========  PUBLIC PROFILE CARD  ==========
+async function showUserProfile(username) {
+  const res = await api('/api/profile/' + encodeURIComponent(username));
+  if (!res.ok) return toast(res.data.error || 'Failed to load profile', 'error');
+  const u = res.data.user;
+  const memberSince = u.created_at ? formatDate(u.created_at) : 'unknown';
+
+  const avatar = avatarHtml(u, 'xl');
+  const badges = u.active_badges && u.active_badges.length
+    ? `<div class="profile-badges">${badgesHtml(u.active_badges)}</div>`
+    : '';
+  const bio = u.bio
+    ? `<div class="profile-bio">${esc(u.bio)}</div>`
+    : '';
+  const stats = u.hidden ? '' : `
+    <div class="profile-stats">
+      <div class="profile-stat">
+        <div class="profile-stat-num">💎 ${(u.shards || 0).toLocaleString()}</div>
+        <div class="profile-stat-label">Shards</div>
+      </div>
+      <div class="profile-stat">
+        <div class="profile-stat-num">${u.referrals || 0}</div>
+        <div class="profile-stat-label">Referrals</div>
+      </div>
+    </div>
+  `;
+
+  showProfileCard(`
+    ${avatar}
+    <div class="profile-name" style="color: ${esc(u.nickname_color || '#00d9ff')}">${esc(u.username)}</div>
+    <div class="profile-since">Member since ${memberSince}</div>
+    ${badges}
+    ${bio}
+    ${stats}
+  `);
+}
+
 // ==========  ADMIN PANEL  ==========
 document.getElementById('admin-btn').addEventListener('click', () => {
+  const isOwner = currentUser.is_owner;
+  const perms = currentUser.permissions || {};
+
   showModal(`
-    <h3>👑 <span class="accent">Admin panel</span></h3>
+    <h3>👑 Admin <span class="accent">panel</span></h3>
     <div class="admin-tabs">
       <button class="admin-tab active" onclick="switchAdmin(this,'stats')">Stats</button>
       <button class="admin-tab" onclick="switchAdmin(this,'users')">Users</button>
       <button class="admin-tab" onclick="switchAdmin(this,'bans')">IP Bans</button>
       <button class="admin-tab" onclick="switchAdmin(this,'ann')">Announcements</button>
-      <button class="admin-tab" onclick="switchAdmin(this,'set')">Settings</button>
+      <button class="admin-tab" onclick="switchAdmin(this,'aff')">Affiliates</button>
+      ${(isOwner || perms.can_manage_shop_items) ? `<button class="admin-tab" onclick="switchAdmin(this,'shop')">Shop mgmt</button>` : ''}
+      ${(isOwner || perms.can_view_messages) ? `<button class="admin-tab" onclick="switchAdmin(this,'emerg')">Emergency</button>` : ''}
+      ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'rights')">Admin Rights</button>` : ''}
+      ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'set')">Settings</button>` : ''}
       <button class="admin-tab" onclick="switchAdmin(this,'audit')">Audit log</button>
       <button class="admin-tab" onclick="switchAdmin(this,'spam')">Spam</button>
     </div>
     <div id="admin-body"></div>
-  `, true);
+  `, true, true);
   loadAdminStats();
 });
 
 function switchAdmin(btn, tab) {
   document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
-  ({
+  const fn = {
     stats: loadAdminStats,
     users: loadAdminUsers,
     bans: loadAdminBans,
     ann: loadAdminAnn,
+    aff: loadAdminAffiliates,
+    shop: loadAdminShop,
+    emerg: loadAdminEmergency,
+    rights: loadAdminRights,
     set: loadAdminSettings,
     audit: loadAdminAudit,
     spam: loadAdminSpam
-  }[tab] || loadAdminStats)();
+  }[tab];
+  if (fn) fn();
 }
 
 async function loadAdminStats() {
@@ -1401,40 +1960,104 @@ async function loadAdminStats() {
   `;
 }
 
-async function loadAdminUsers() {
+// ==========  ADMIN USERS with search + pagination  ==========
+let adminUsersOffset = 0;
+let adminUsersSearch = '';
+let adminUsersLoaded = [];
+
+async function loadAdminUsers(reset = true) {
   const body = document.getElementById('admin-body');
-  body.innerHTML = 'Loading...';
-  const res = await api('/api/admin/users');
-  const users = res.data.users || [];
-  body.innerHTML = `
+  if (reset) {
+    adminUsersOffset = 0;
+    adminUsersLoaded = [];
+    body.innerHTML = `
+      <div class="admin-search">
+        <input type="text" id="user-search" placeholder="Search users by username..." value="${esc(adminUsersSearch)}">
+        <button class="btn-mini" onclick="doAdminUserSearch()">Search</button>
+        <button class="btn-mini ghost" onclick="clearAdminUserSearch()">Clear</button>
+      </div>
+      <div id="admin-users-list">Loading...</div>
+    `;
+    document.getElementById('user-search').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doAdminUserSearch();
+    });
+  }
+
+  const url = `/api/admin/users?offset=${adminUsersOffset}&limit=20${adminUsersSearch ? '&search=' + encodeURIComponent(adminUsersSearch) : ''}`;
+  const res = await api(url);
+  if (!res.ok) return;
+
+  const newUsers = res.data.users || [];
+  adminUsersLoaded = adminUsersLoaded.concat(newUsers);
+  adminUsersOffset += newUsers.length;
+
+  renderAdminUsersList(res.data.total, res.data.has_more);
+}
+
+function doAdminUserSearch() {
+  adminUsersSearch = document.getElementById('user-search').value.trim();
+  loadAdminUsers(true);
+}
+function clearAdminUserSearch() {
+  adminUsersSearch = '';
+  document.getElementById('user-search').value = '';
+  loadAdminUsers(true);
+}
+
+function renderAdminUsersList(total, hasMore) {
+  const rows = adminUsersLoaded.map(u => {
+    let badges = '';
+    if (u.is_owner) badges += '<span class="badge owner">Owner</span>';
+    if (u.is_admin && !u.is_owner) badges += '<span class="badge admin">Admin</span>';
+    if (u.is_immune) badges += '<span class="badge immune">Immune</span>';
+    if (u.suspended) badges += '<span class="badge suspended">Suspended</span>';
+    if (u.totp_enabled) badges += '<span class="badge info">2FA</span>';
+    if ((u.throttle_level || 0) > 0) badges += `<span class="badge warn">Throttle L${u.throttle_level}</span>`;
+    if ((u.spam_warnings || 0) > 0) badges += `<span class="badge critical">${u.spam_warnings} warns</span>`;
+
+    let actions = '';
+    if (!u.is_immune) {
+      actions += `<button class="btn-mini" onclick="adminToggle('${u.id}','suspended',${!u.suspended})">${u.suspended ? 'Unsuspend' : 'Suspend'}</button>`;
+      if (currentUser.is_owner) {
+        actions += `<button class="btn-mini" onclick="adminToggle('${u.id}','is_admin',${!u.is_admin})">${u.is_admin ? '-Admin' : '+Admin'}</button>`;
+      }
+      actions += `<button class="btn-mini warn" onclick="adminPunish('${u.id}','${esc(u.username)}')">Punish</button>`;
+      actions += `<button class="btn-mini danger" onclick="adminBanAccount('${u.id}','${esc(u.username)}')">Ban acc</button>`;
+      actions += `<button class="btn-mini" onclick="adminResetPw('${u.id}')">Reset PW</button>`;
+      actions += `<button class="btn-mini danger" onclick="adminBanIP('${esc(u.last_ip || '')}')">Ban IP</button>`;
+      if (currentUser.is_owner && !u.is_owner) {
+        actions += `<button class="btn-mini danger" onclick="ownerDeleteUser('${u.id}','${esc(u.username)}')">Delete</button>`;
+      }
+    } else {
+      actions = '<span style="color: var(--text-mute); font-size: 11px;">Immune (protected)</span>';
+    }
+
+    return `
+      <tr>
+        <td>
+          <span style="color: ${esc(u.nickname_color)}; font-weight: 500; cursor: pointer;" onclick="showUserProfile('${esc(u.username)}')">${esc(u.username)}</span>
+          ${badges}
+          <div style="color: var(--text-mute); font-size: 10px; margin-top: 2px;">💎 ${u.shards || 0}</div>
+        </td>
+        <td><code style="font-size: 11px;">${esc(u.last_ip || '-')}</code></td>
+        <td style="font-size: 11px; color: var(--text-mute);">${u.last_seen ? new Date(u.last_seen).toLocaleDateString() : '-'}</td>
+        <td>${actions}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const listEl = document.getElementById('admin-users-list');
+  listEl.innerHTML = `
     <table>
       <thead><tr><th>User</th><th>IP</th><th>Last seen</th><th>Actions</th></tr></thead>
-      <tbody>${users.map(u => `
-        <tr>
-          <td>
-            <span style="color: ${esc(u.nickname_color)}; font-weight: 500;">${esc(u.username)}</span>
-            ${u.is_owner ? '<span class="badge owner">Owner</span>' : ''}
-            ${u.is_admin && !u.is_owner ? '<span class="badge admin">Admin</span>' : ''}
-            ${u.is_immune ? '<span class="badge info">Immune</span>' : ''}
-            ${u.suspended ? '<span class="badge suspended">Suspended</span>' : ''}
-            ${u.totp_enabled ? '<span class="badge info">2FA</span>' : ''}
-            ${(u.throttle_level || 0) > 0 ? `<span class="badge warn">Throttle L${u.throttle_level}</span>` : ''}
-            ${(u.spam_warnings || 0) > 0 ? `<span class="badge critical">${u.spam_warnings} warns</span>` : ''}
-          </td>
-          <td><code>${esc(u.last_ip || '-')}</code></td>
-          <td style="font-size: 11px; color: var(--text-mute);">${u.last_seen ? new Date(u.last_seen).toLocaleDateString() : '-'}</td>
-          <td>
-            ${!u.is_immune ? `
-              <button class="btn-mini" onclick="adminToggle('${u.id}','suspended',${!u.suspended})">${u.suspended ? 'Unsuspend' : 'Suspend'}</button>
-              <button class="btn-mini" onclick="adminToggle('${u.id}','is_admin',${!u.is_admin})">${u.is_admin ? '-Admin' : '+Admin'}</button>
-              <button class="btn-mini warn" onclick="adminPunish('${u.id}','${esc(u.username)}')">Punish</button>
-              <button class="btn-mini" onclick="adminResetPw('${u.id}')">Reset PW</button>
-              <button class="btn-mini danger" onclick="adminBanIP('${esc(u.last_ip || '')}')">Ban IP</button>
-            ` : '<span style="color: var(--text-mute); font-size: 11px;">Immune (protected)</span>'}
-          </td>
-        </tr>
-      `).join('')}</tbody>
+      <tbody>${rows || '<tr class="empty-row"><td colspan="4">No users found</td></tr>'}</tbody>
     </table>
+    ${hasMore ? `
+      <div class="load-more-wrap">
+        <div class="info">Showing ${adminUsersLoaded.length} of ${total}</div>
+        <button class="btn-mini" onclick="loadAdminUsers(false)">Load 20 more</button>
+      </div>
+    ` : (adminUsersLoaded.length > 0 ? `<div class="load-more-wrap"><div class="info">Showing all ${adminUsersLoaded.length} of ${total}</div></div>` : '')}
   `;
 }
 
@@ -1442,11 +2065,19 @@ async function adminToggle(uid, field, val) {
   const res = await api(`/api/admin/user/${uid}`, { method: 'POST', body: { [field]: val } });
   if (!res.ok) return toast(res.data.error, 'error');
   toast('Updated', 'success');
-  loadAdminUsers();
+  loadAdminUsers(true);
 }
 
 async function adminResetPw(uid) {
-  if (!confirm('Reset password for this user?')) return;
+  showModal(`
+    <h3>Reset password?</h3>
+    <p>A new random password will be generated. Give it to the user.</p>
+    <button class="btn danger" onclick="confirmResetPw('${uid}')">Yes, reset it</button>
+    <button class="btn secondary" style="margin-top: 8px;" onclick="closeModal()">Cancel</button>
+  `);
+}
+
+async function confirmResetPw(uid) {
   const res = await api(`/api/admin/user/${uid}/reset_password`, { method: 'POST' });
   if (!res.ok) return toast(res.data.error, 'error');
   showModal(`
@@ -1509,12 +2140,69 @@ async function removePunishment(pid, uid) {
   loadPunishmentHistory(uid);
 }
 
+// Ban account (I3)
+async function adminBanAccount(uid, username) {
+  showModal(`
+    <h3>Ban <span class="accent">${esc(username)}</span>'s account</h3>
+    <p>This will block them from logging in on ANY device or IP.</p>
+    <div class="field"><label>Reason</label><input type="text" id="ba-reason"></div>
+    <div class="field"><label>Duration in hours (blank = permanent)</label><input type="number" id="ba-hours"></div>
+    <button class="btn danger" onclick="doBanAccount('${uid}')">Ban account</button>
+  `);
+}
+
+async function doBanAccount(uid) {
+  const body = {
+    reason: document.getElementById('ba-reason').value.trim(),
+    hours: parseInt(document.getElementById('ba-hours').value) || null
+  };
+  const res = await api(`/api/admin/user/${uid}/ban_account`, { method: 'POST', body });
+  if (!res.ok) return toast(res.data.error, 'error');
+  toast('Account banned', 'success');
+  closeModal();
+  loadAdminUsers(true);
+}
+
+// Owner delete user (I4)
+function ownerDeleteUser(uid, username) {
+  const expected = `DELETE @${username}`;
+  showModal(`
+    <h3 style="color: var(--danger)">Delete @${esc(username)}'s account?</h3>
+    <p>This PERMANENTLY deletes their account, all their messages, Shards, purchases, and profile.</p>
+    <p style="color: var(--danger);">This cannot be undone.</p>
+    <div class="field"><label>Type <code>${esc(expected)}</code> to confirm</label>
+      <input type="text" id="del-user-confirm" placeholder="${esc(expected)}">
+    </div>
+    <button class="btn danger" onclick="doOwnerDeleteUser('${uid}','${esc(expected)}')">Delete permanently</button>
+    <button class="btn secondary" style="margin-top: 8px;" onclick="closeModal()">Cancel</button>
+  `);
+}
+
+async function doOwnerDeleteUser(uid, expected) {
+  const confirm = document.getElementById('del-user-confirm').value;
+  if (confirm !== expected) return toast('Confirmation does not match', 'error');
+  const res = await api(`/api/admin/user/${uid}/delete`, { method: 'POST', body: { confirm } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  toast('User deleted', 'success');
+  closeModal();
+  loadAdminUsers(true);
+}
+
 async function adminBanIP(ip) {
   if (!ip || ip === '-') return toast('No IP available', 'error');
-  const reason = prompt(`Ban IP ${ip}? Reason:`) || '';
+  showModal(`
+    <h3>Ban IP <code>${esc(ip)}</code>?</h3>
+    <div class="field"><label>Reason (optional)</label><input type="text" id="banip-reason"></div>
+    <button class="btn danger" onclick="doAdminBanIP('${esc(ip)}')">Ban IP</button>
+  `);
+}
+
+async function doAdminBanIP(ip) {
+  const reason = document.getElementById('banip-reason').value.trim();
   const res = await api('/api/admin/ban', { method: 'POST', body: { ip, reason } });
   if (!res.ok) return toast(res.data.error, 'error');
   toast('IP banned', 'success');
+  closeModal();
 }
 
 async function loadAdminBans() {
@@ -1609,9 +2297,256 @@ async function deleteAnn(id) {
   loadAnnouncements();
 }
 
+// ==========  ADMIN: Affiliate approval  ==========
+async function loadAdminAffiliates() {
+  const body = document.getElementById('admin-body');
+  const res = await api('/api/admin/affiliate/pending');
+  if (!res.ok) {
+    body.innerHTML = '<p>You do not have permission to view this.</p>';
+    return;
+  }
+  const pending = res.data.pending || [];
+  body.innerHTML = `
+    <h4>Pending affiliate code requests</h4>
+    ${pending.map(p => `
+      <div class="affiliate-code-card">
+        <div>
+          <span class="affiliate-code-key">${esc(p.code)}</span>
+          <div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">
+            by @${esc(p.users?.username || '?')} · ${new Date(p.created_at).toLocaleDateString()}
+          </div>
+          ${p.reason ? `<div style="color: var(--text); font-size: 12px; margin-top: 6px; padding: 6px 8px; background: var(--bg-3); border-radius: 6px;">${esc(p.reason)}</div>` : ''}
+        </div>
+        <div>
+          <button class="btn-mini success" onclick="approveAff('${p.id}')">Approve</button>
+          <button class="btn-mini danger" onclick="rejectAff('${p.id}')">Reject</button>
+        </div>
+      </div>
+    `).join('') || '<p style="color: var(--text-mute); padding: 20px; text-align: center;">No pending requests</p>'}
+  `;
+}
+
+async function approveAff(id) {
+  const res = await api(`/api/admin/affiliate/${id}/approve`, { method: 'POST' });
+  if (!res.ok) return toast(res.data.error, 'error');
+  toast('Approved', 'success');
+  loadAdminAffiliates();
+}
+
+async function rejectAff(id) {
+  const reason = window.prompt('Rejection reason (optional):') || '';
+  const res = await api(`/api/admin/affiliate/${id}/reject`, { method: 'POST', body: { reason } });
+  if (!res.ok) return toast(res.data.error, 'error');
+  toast('Rejected', 'success');
+  loadAdminAffiliates();
+}
+
+// ==========  ADMIN: Shop management  ==========
+async function loadAdminShop() {
+  const body = document.getElementById('admin-body');
+  const res = await api('/api/admin/shop/items');
+  if (!res.ok) { body.innerHTML = '<p>You do not have permission.</p>'; return; }
+  const items = res.data.items || [];
+  body.innerHTML = `
+    <table>
+      <thead><tr><th>Item</th><th>Category</th><th>Price</th><th>Enabled</th><th></th></tr></thead>
+      <tbody>${items.map(i => `
+        <tr>
+          <td>${esc(i.icon || '💎')} ${esc(i.name)}<br><code style="font-size: 10px;">${esc(i.item_key)}</code></td>
+          <td>${esc(i.category)}</td>
+          <td>
+            <input type="number" value="${i.price}" style="width: 80px; margin: 0; padding: 4px 6px;" id="shop-price-${i.id}">
+          </td>
+          <td>
+            <input type="checkbox" ${i.enabled ? 'checked' : ''} id="shop-enabled-${i.id}">
+          </td>
+          <td><button class="btn-mini" onclick="saveShopItem('${i.id}')">Save</button></td>
+        </tr>
+      `).join('')}</tbody>
+    </table>
+  `;
+}
+
+async function saveShopItem(id) {
+  const price = parseInt(document.getElementById('shop-price-' + id).value) || 0;
+  const enabled = document.getElementById('shop-enabled-' + id).checked;
+  const res = await api(`/api/admin/shop/items/${id}`, { method: 'POST', body: { price, enabled } });
+  if (!res.ok) return toast(res.data.error, 'error');
+  toast('Saved', 'success');
+}
+
+// ==========  ADMIN: Emergency viewer  ==========
+async function loadAdminEmergency() {
+  const body = document.getElementById('admin-body');
+  const isOwner = currentUser.is_owner;
+  body.innerHTML = `
+    ${!isOwner ? `<div class="emergency-warning"><strong>⚠️ Admin access is logged.</strong> Every conversation you view here will be recorded with your reason. Only use this for legitimate abuse investigation.</div>` : ''}
+    <div class="field"><input type="text" id="emerg-search" placeholder="Search user by username..."></div>
+    <div id="emerg-results"></div>
+    ${isOwner ? '<button class="btn secondary" style="margin-top: 20px;" onclick="loadOwnerAccessLog()">View admin access history</button>' : ''}
+    <div id="emerg-access-log"></div>
+  `;
+  document.getElementById('emerg-search').addEventListener('input', (e) => {
+    clearTimeout(window._emergSearch);
+    window._emergSearch = setTimeout(() => doEmergencySearch(e.target.value.trim()), 300);
+  });
+}
+
+async function doEmergencySearch(q) {
+  const box = document.getElementById('emerg-results');
+  if (!q) { box.innerHTML = ''; return; }
+  const res = await api('/api/admin/emergency/search?q=' + encodeURIComponent(q));
+  if (!res.ok) { box.innerHTML = ''; return; }
+  const users = res.data.users || [];
+  box.innerHTML = users.map(u => `
+    <div class="emergency-user-result" onclick="loadEmergencyUserConvs('${u.id}','${esc(u.username)}')">
+      ${avatarHtml(u, 'sm')}
+      <div>
+        <div style="color: ${esc(u.nickname_color || '#00d9ff')}; font-weight: 500;">${esc(u.username)}</div>
+        <div style="color: var(--text-mute); font-size: 11px;">Last seen: ${u.last_seen ? new Date(u.last_seen).toLocaleDateString() : 'never'}</div>
+      </div>
+    </div>
+  `).join('') || '<p style="color: var(--text-mute); padding: 12px;">No users found</p>';
+}
+
+async function loadEmergencyUserConvs(uid, username) {
+  const box = document.getElementById('emerg-results');
+  box.innerHTML = `<h4>Conversations for ${esc(username)}</h4><p>Loading...</p>`;
+  const res = await api('/api/admin/emergency/user_conversations/' + uid);
+  if (!res.ok) { box.innerHTML = '<p>Failed to load</p>'; return; }
+  const convs = res.data.conversations || [];
+  box.innerHTML = `
+    <h4>Conversations for ${esc(username)}</h4>
+    <button class="btn-mini ghost" onclick="doEmergencySearch(document.getElementById('emerg-search').value.trim())">← Back to search</button>
+    <div style="margin-top: 12px;">
+      ${convs.map(c => `
+        <div class="emergency-conv-item" onclick="viewEmergencyMessages('${c.id}','${uid}','${esc(username)}')">
+          <b>${esc(c.name || (c.is_group ? 'Group chat' : 'DM'))}</b>
+          <div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">
+            ${c.members.map(m => esc(m)).join(', ')}
+          </div>
+          <div style="color: var(--text-mute); font-size: 10px; margin-top: 2px;">
+            Updated: ${new Date(c.updated_at).toLocaleString()}
+          </div>
+        </div>
+      `).join('') || '<p style="color: var(--text-mute);">No conversations</p>'}
+    </div>
+  `;
+}
+
+async function viewEmergencyMessages(cid, targetUid, targetUsername) {
+  const isOwner = currentUser.is_owner;
+  let reason = '';
+  if (!isOwner) {
+    reason = window.prompt(`Reason for viewing this conversation (minimum 10 characters):`, '') || '';
+    if (reason.trim().length < 10) {
+      return toast('Reason must be at least 10 characters', 'error');
+    }
+  }
+
+  const res = await api('/api/admin/emergency/messages', {
+    method: 'POST',
+    body: { conversation_id: cid, target_user_id: targetUid, reason }
+  });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+
+  const msgs = res.data.messages || [];
+  const html = msgs.map(m => {
+    const senderName = m.users?.username || '[deleted user]';
+    const time = new Date(m.created_at).toLocaleString();
+    const content = m.content ? esc(m.content) : (m.image_url ? '[image]' : '[empty]');
+    const anonNote = m.is_anonymous ? ' <span class="anonymous-tag">was anon</span>' : '';
+    const deletedNote = m.deleted ? ' <span style="color: var(--danger); font-size: 10px;">[deleted]</span>' : '';
+    return `
+      <div class="emergency-msg">
+        <div class="emergency-msg-header">
+          <span class="emergency-msg-sender">${esc(senderName)}${anonNote}${deletedNote}</span>
+          <span>${time}</span>
+        </div>
+        <div>${content}</div>
+      </div>
+    `;
+  }).join('');
+
+  const box = document.getElementById('emerg-results');
+  box.innerHTML = `
+    <h4>Messages (${msgs.length}) — ${esc(targetUsername)}'s chat</h4>
+    <button class="btn-mini ghost" onclick="loadEmergencyUserConvs('${targetUid}','${esc(targetUsername)}')">← Back to conversations</button>
+    <div style="margin-top: 12px; max-height: 500px; overflow-y: auto;">${html || '<p>No messages</p>'}</div>
+  `;
+}
+
+async function loadOwnerAccessLog() {
+  const box = document.getElementById('emerg-access-log');
+  const res = await api('/api/admin/emergency/access_log');
+  if (!res.ok) { box.innerHTML = '<p>Failed to load</p>'; return; }
+  const logs = res.data.logs || [];
+  box.innerHTML = `
+    <h4>Admin access history</h4>
+    ${logs.map(l => `
+      <div style="padding: 10px; border-bottom: 1px solid var(--border); font-size: 12px;">
+        <b>${esc(l.viewer_username)}</b> viewed
+        ${l.target_username ? '@' + esc(l.target_username) + "'s" : 'a'} conversation
+        <div style="color: var(--text-dim); margin-top: 4px;">Reason: ${esc(l.reason || '(none)')}</div>
+        <div style="color: var(--text-mute); font-size: 10px; margin-top: 2px; font-family: monospace;">
+          ${new Date(l.created_at).toLocaleString()} · IP: ${esc(l.ip || '-')}
+        </div>
+      </div>
+    `).join('') || '<p style="color: var(--text-mute); padding: 12px;">No access logged</p>'}
+  `;
+}
+
+// ==========  ADMIN: Admin Rights (owner only)  ==========
+async function loadAdminRights() {
+  const body = document.getElementById('admin-body');
+  const res = await api('/api/admin/admin_rights');
+  if (!res.ok) { body.innerHTML = '<p>Owner only.</p>'; return; }
+  const admins = res.data.admins || [];
+  const permLabels = {
+    can_view_messages: 'View messages (Emergency)',
+    can_approve_affiliates: 'Approve affiliates',
+    can_create_announcements: 'Create announcements',
+    can_ban_ips: 'Ban IPs',
+    can_suspend_ban_users: 'Suspend/ban users',
+    can_reset_passwords: 'Reset passwords',
+    can_manage_shop_items: 'Manage shop',
+    can_manage_admins: 'Manage admins'
+  };
+  body.innerHTML = `
+    <p>Toggle what each admin can do. Owner has all permissions.</p>
+    ${admins.map(a => `
+      <div class="admin-list-header">
+        ${avatarHtml(a, 'sm')}
+        <div style="flex: 1;">
+          <b style="color: ${esc(a.nickname_color)}">${esc(a.username)}</b>
+          ${a.is_owner ? '<span class="badge owner">Owner</span>' : ''}
+        </div>
+      </div>
+      ${a.is_owner ? '<p style="color: var(--text-mute); padding: 12px;">Owner has all permissions by default.</p>' : `
+        <div class="rights-grid">
+          ${Object.entries(permLabels).map(([k, label]) => `
+            <label class="right-toggle">
+              <span>${label}</span>
+              <input type="checkbox" ${a.permissions[k] ? 'checked' : ''} onchange="updateRight('${a.id}','${k}',this.checked)">
+            </label>
+          `).join('')}
+        </div>
+      `}
+    `).join('')}
+  `;
+}
+
+async function updateRight(uid, key, val) {
+  const res = await api(`/api/admin/admin_rights/${uid}`, { method: 'POST', body: { [key]: val } });
+  if (!res.ok) return toast(res.data.error, 'error');
+  toast(val ? 'Enabled' : 'Disabled', 'success');
+}
+
+// ==========  ADMIN: Settings  ==========
 async function loadAdminSettings() {
   const body = document.getElementById('admin-body');
   const res = await api('/api/admin/settings');
+  if (!res.ok) { body.innerHTML = '<p>Owner only.</p>'; return; }
   const s = res.data.settings || {};
   body.innerHTML = `
     <div class="setting-row">
@@ -1640,6 +2575,24 @@ async function loadAdminSettings() {
     </div>
     <div class="setting-row">
       <div class="setting-info">
+        <div class="setting-label">Affiliate mode</div>
+        <div class="setting-desc">How affiliate codes are created</div>
+      </div>
+      <select id="ss-affmode">
+        <option value="everyone" ${s.affiliate_mode === 'everyone' ? 'selected' : ''}>Everyone</option>
+        <option value="requires_approval" ${s.affiliate_mode === 'requires_approval' ? 'selected' : ''}>Requires approval</option>
+        <option value="owner_only" ${s.affiliate_mode === 'owner_only' ? 'selected' : ''}>Owner only</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <div class="setting-info">
+        <div class="setting-label">Shards per referral</div>
+        <div class="setting-desc">Reward when someone uses your affiliate code</div>
+      </div>
+      <input type="number" id="ss-shards" value="${s.shards_per_referral || 10}">
+    </div>
+    <div class="setting-row">
+      <div class="setting-info">
         <div class="setting-label">Message retention (days)</div>
         <div class="setting-desc">How long messages last by default</div>
       </div>
@@ -1661,6 +2614,8 @@ async function saveAdminSettings() {
     signups_enabled: document.getElementById('ss-signups').checked,
     invites_enabled: document.getElementById('ss-invites').checked,
     invite_creation_mode: document.getElementById('ss-mode').value,
+    affiliate_mode: document.getElementById('ss-affmode').value,
+    shards_per_referral: parseInt(document.getElementById('ss-shards').value) || 10,
     default_retention_days: parseInt(document.getElementById('ss-days').value) || 30,
     maintenance_mode: document.getElementById('ss-maint').checked
   };
@@ -1689,18 +2644,17 @@ async function loadAdminSpam() {
   const res = await api('/api/admin/spam_events');
   const events = res.data.events || [];
   body.innerHTML = `
-    <p>Recent spam detection events. Users get warnings 1-5 before permanent IP ban.</p>
+    <p>Users get warnings 1-5 before permanent IP ban.</p>
     <table>
-      <thead><tr><th>User</th><th>Warning #</th><th>Reason</th><th>IP</th><th>When</th></tr></thead>
+      <thead><tr><th>User</th><th>Warning #</th><th>Reason</th><th>When</th></tr></thead>
       <tbody>${events.map(e => `
         <tr>
           <td>${esc(e.users?.username || '?')}</td>
           <td><span class="badge ${e.warning_number >= 4 ? 'critical' : 'warn'}">${e.warning_number}</span></td>
           <td>${esc(e.trigger_reason || '-')}</td>
-          <td><code>${esc(e.ip_address || '-')}</code></td>
           <td style="font-size: 11px; color: var(--text-mute);">${new Date(e.created_at).toLocaleString()}</td>
         </tr>
-      `).join('') || '<tr class="empty-row"><td colspan="5">No spam events</td></tr>'}</tbody>
+      `).join('') || '<tr class="empty-row"><td colspan="4">No spam events</td></tr>'}</tbody>
     </table>
   `;
 }
@@ -1729,146 +2683,7 @@ function dismissAnnouncement(id) {
   document.getElementById('announcement-bar').classList.add('hidden');
 }
 
-// ==========  ToS MODAL (N1)  ==========
-function showToSModal() {
-  const tos = `
-    <h2>Terms of Service — Cipher</h2>
-    <p><strong>Effective Date:</strong> August 2026</p>
-    <h3>1. Service Description</h3>
-    <p>Cipher is a private, end-to-end encrypted messaging platform.</p>
-    <h3>2. Data Retention</h3>
-    <p>Messages are automatically deleted after 30 days by default. Users can extend retention.</p>
-    <h3>3. Privacy &amp; Emergency Access</h3>
-    <p>The owner may access messages for abuse investigation. All admin access is logged.</p>
-    <h3>4. Accounts</h3>
-    <p>Users are responsible for their account security. Recovery tools are provided at signup.</p>
-    <h3>5. Conduct</h3>
-    <p>No harassment, spam, or illegal content. Violations may result in bans.</p>
-    <h3>6. Affiliate &amp; Shards</h3>
-    <p>Self-referral is prohibited. Shards have no real-world value.</p>
-    <h3>7. Modifications</h3>
-    <p>Continued use = acceptance of current terms.</p>
-  `;
-  showModal(`
-    <h3>Terms of Service</h3>
-    <div style="max-height: 420px; overflow-y: auto; padding-right: 10px; line-height: 1.6; font-size: 13.5px;">
-      ${tos}
-    </div>
-    <button class="btn primary" style="margin-top: 16px;" onclick="closeModal()">I Understand</button>
-  `, true);
-}
-
-// ==========  NEW SIDEBAR BUTTONS (v1.1)  ==========
-function initNewSidebarButtons() {
-  // Shop button
-  const shopBtn = document.createElement('button');
-  shopBtn.className = 'tool';
-  shopBtn.title = 'Shop';
-  shopBtn.innerHTML = '💎';
-  shopBtn.onclick = showShopModal;
-  document.querySelector('.tool-row').appendChild(shopBtn);
-
-  // Leaderboard button
-  const lbBtn = document.createElement('button');
-  lbBtn.className = 'tool';
-  lbBtn.title = 'Leaderboard';
-  lbBtn.innerHTML = '🏆';
-  lbBtn.onclick = showLeaderboardModal;
-  document.querySelector('.tool-row').appendChild(lbBtn);
-
-  // Affiliate button
-  const affBtn = document.createElement('button');
-  affBtn.className = 'tool';
-  affBtn.title = 'Affiliate';
-  affBtn.innerHTML = '🔗';
-  affBtn.onclick = showAffiliateModal;
-  document.querySelector('.tool-row').appendChild(affBtn);
-}
-
-// ==========  SHOP MODAL (N17)  ==========
-async function showShopModal() {
-  const res = await api('/api/shop/items');
-  const items = res.data.items || [];
-  let html = `<h3>💎 <span class="accent">Shard Shop</span></h3><div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(160px,1fr)); gap:12px;">`;
-  items.forEach(item => {
-    html += `
-      <div style="background:var(--bg-3); border-radius:10px; padding:12px; border:1px solid var(--border);">
-        <div style="font-weight:600;">${item.name}</div>
-        <div style="font-size:12px; color:var(--text-dim); margin:4px 0 8px;">${item.description}</div>
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span style="color:#eab308; font-weight:600;">${item.price} 💎</span>
-          <button class="btn-mini" onclick="buyShopItem('${item.id}', this)">Buy</button>
-        </div>
-      </div>`;
-  });
-  html += `</div>`;
-  showModal(html, true);
-}
-
-async function buyShopItem(itemId, btn) {
-  btn.disabled = true;
-  const res = await api('/api/shop/buy', { method: 'POST', body: { item_id: itemId } });
-  if (res.ok) {
-    toast('Purchase successful!', 'success');
-    closeModal();
-  } else {
-    toast(res.data.error || 'Purchase failed', 'error');
-    btn.disabled = false;
-  }
-}
-
-// ==========  LEADERBOARD MODAL (N20)  ==========
-async function showLeaderboardModal() {
-  const res = await api('/api/leaderboard');
-  const users = res.data.users || [];
-  let html = `<h3>🏆 <span class="accent">Leaderboard</span></h3><table><thead><tr><th>#</th><th>User</th><th>Shards</th></tr></thead><tbody>`;
-  users.forEach((u, i) => {
-    html += `<tr><td>${i+1}</td><td>${esc(u.username)}</td><td>${u.shards} 💎</td></tr>`;
-  });
-  html += `</tbody></table>`;
-  showModal(html, true);
-}
-
-// ==========  AFFILIATE MODAL (N14)  ==========
-async function showAffiliateModal() {
-  const res = await api('/api/affiliate/codes');
-  const codes = res.data.codes || [];
-  let html = `<h3>🔗 <span class="accent">Your Affiliate Codes</span></h3>`;
-  if (codes.length === 0) {
-    html += `<p>You have no affiliate codes yet.</p>`;
-  } else {
-    html += codes.map(c => `<div><b>${c.code}</b> — ${c.uses} uses — ${c.approved ? 'Active' : 'Pending'}</div>`).join('');
-  }
-  html += `<button class="btn primary" style="margin-top:16px;" onclick="createAffiliateCode()">Create New Code</button>`;
-  showModal(html);
-}
-
-async function createAffiliateCode() {
-  const code = prompt('Enter your affiliate code (4-20 chars):');
-  if (!code) return;
-  const res = await api('/api/affiliate/create', { method: 'POST', body: { code } });
-  if (res.ok) toast('Code created!', 'success');
-  else toast(res.data.error, 'error');
-}
-
-// ==========  EMERGENCY TAB (in admin)  ==========
-function addEmergencyTab() {
-  // This would normally be injected into the admin panel
-  // For now, we expose a global function the user can call from console or future UI
-  window.openEmergencyViewer = async () => {
-    const q = prompt('Search username:');
-    if (!q) return;
-    const res = await api(`/api/admin/emergency/search?q=${encodeURIComponent(q)}`);
-    console.log(res.data);
-    // Full UI would be built here in a real implementation
-  };
-}
-
 // ==========  BOOTSTRAP  ==========
 initAuthTabs();
 checkSession();
-initNewSidebarButtons();
-addEmergencyTab();
-
-// Refresh announcements periodically
 setInterval(loadAnnouncements, 60000);
