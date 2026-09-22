@@ -226,7 +226,13 @@ const HyperCrypt = (() => {
       }
     }
 
-    // Brand-new identity for this account
+    // Brand-new identity for this account — but we need the password to seal
+    // the private half for the server, otherwise it is unrecoverable.
+    if (!password) {
+      const err = new Error('need_password');
+      err.needPassword = true;
+      throw err;
+    }
     const curve = pickCurve();
     const pair = await generateIdentityPair(curve);
     const pubRaw = await crypto.subtle.exportKey('raw', pair.publicKey);

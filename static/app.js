@@ -1,5 +1,5 @@
 /* ============================================================
-   CIPHER v1.1.0 — Frontend
+   CIPHER v1.2.0 — Frontend
    Solo project by Stepundrik
    ============================================================ */
 
@@ -24,6 +24,16 @@ let msgListHash = '';
 let convListHash = '';
 let convListTimer = null;
 let sessionCheckWarnedOnce = false;
+
+// v1.2 state
+let badgeCatalog = {};          // badge_key -> {label, icon, tip, color}
+let decryptedPreview = {};      // message id -> plaintext, for the sidebar
+let messageCache = {};          // conversation id -> [decrypted messages]
+let lastMessageStamp = {};      // conversation id -> newest created_at seen
+let notificationTimer = null;
+let encryptionReady = false;
+let shopCurrency = 'shards';
+let lastSorryState = null;
 
 // ==========  UTILITIES  ==========
 function esc(s) {
@@ -146,27 +156,60 @@ function formatDate(iso) {
   } catch { return ''; }
 }
 
-// Render avatar HTML with effect classes and optional custom image
-function avatarHtml(user, size = 'md') {
+// One avatar renderer, used everywhere, so effects show up in the sidebar,
+// the chat header, messages, the leaderboard and profile cards alike (BUG 4).
+function avatarHtml(user, size = 'md', clickable = false) {
   if (!user) return `<div class="avatar ${size}">?</div>`;
   const effects = (user.active_effects || []).join(' ');
   const bgColor = user.nickname_color || '#00d9ff';
   const style = `background: linear-gradient(135deg, ${bgColor}, #6366f1)`;
   const letter = (user.username || '?')[0].toUpperCase();
+  const click = clickable && user.username
+    ? ` onclick="event.stopPropagation(); showUserProfile('${esc(user.username)}')" style="cursor:pointer;${style}"`
+    : ` style="${style}"`;
   if (user.avatar_url) {
-    return `<div class="avatar ${size} ${effects}"><img src="${esc(user.avatar_url)}" alt=""></div>`;
+    return `<div class="avatar ${size} ${effects}"${click}><img src="${esc(user.avatar_url)}" alt=""></div>`;
   }
-  return `<div class="avatar ${size} ${effects}" style="${style}">${esc(letter)}</div>`;
+  return `<div class="avatar ${size} ${effects}"${click}>${esc(letter)}</div>`;
 }
 
-// Render badges HTML
-function badgesHtml(activeBadges) {
-  if (!activeBadges || !activeBadges.length) return '';
-  return activeBadges.map(b => {
-    let cls = b;
-    if (!cls.startsWith('badge-')) cls = 'badge-' + cls;
-    return `<span class="user-badge ${cls}"></span>`;
+function badgeMeta(key) {
+  const k = String(key || '').replace(/^badge-/, '');
+  return badgeCatalog[k] || { label: k, icon: '🏅' };
+}
+
+// Badges with a real label, icon and hover tooltip (BUG 3). Max 5 inline;
+// the rest collapse into a "+N more" chip that opens the full grid.
+function badgesHtml(activeBadges, opts = {}) {
+  const list = (activeBadges || []).filter(Boolean);
+  if (!list.length) return '';
+  const max = opts.max || 5;
+  const shown = list.slice(0, max);
+  const rest = list.slice(max);
+  const chips = shown.map(b => {
+    const meta = badgeMeta(b);
+    const key = String(b).replace(/^badge-/, '');
+    const tip = meta.tip ? ` — ${esc(meta.tip)}` : '';
+    return `<span class="user-badge badge-${esc(key)}" title="${esc(meta.label)}${tip}"
+      ${meta.color ? `style="--badge-color:${esc(meta.color)}"` : ''}>${esc(meta.icon || '')}<span class="badge-label">${esc(meta.label)}</span></span>`;
   }).join('');
+  const more = rest.length
+    ? `<button class="user-badge more" type="button" onclick="event.stopPropagation(); showAllBadges(${esc(JSON.stringify(list))})">+${rest.length} more</button>`
+    : '';
+  return `<span class="badge-strip ${opts.size === 'lg' ? 'lg' : ''}">${chips}${more}</span>`;
+}
+
+function showAllBadges(list) {
+  const items = (list || []).map(b => {
+    const meta = badgeMeta(b);
+    const key = String(b).replace(/^badge-/, '');
+    return `<div class="badge-grid-item badge-${esc(key)}">
+      <div class="badge-grid-icon">${esc(meta.icon || '🏅')}</div>
+      <div><div class="badge-grid-name">${esc(meta.label)}</div>
+      <div class="badge-grid-tip">${esc(meta.tip || '')}</div></div>
+    </div>`;
+  }).join('');
+  showModal(`<h3>🏅 <span class="accent">Badges</span></h3><div class="badge-grid">${items}</div>`, true);
 }
 
 // ==========  AUTH SCREEN  ==========
@@ -249,6 +292,7 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
   }
 
   currentUser = res.data.user;
+  pendingUnlockPassword = body.password;
 
   if (isSignup && res.data.recovery_phrase) {
     showRecoveryModal(res.data.recovery_phrase, res.data.recovery_key);
@@ -434,7 +478,7 @@ async function doRecover(method) {
   setTimeout(closeModal, 2000);
 }
 
-// ==========  ToS MODAL  ==========
+// ==========  ToS MODAL (sections + a +5 bonus for actually reading)  ==========
 async function showTosModal() {
   showModal(`
     <h3>📜 <span class="accent">Terms of Service</span></h3>
@@ -442,8 +486,31 @@ async function showTosModal() {
   `, true);
   const res = await api('/api/tos');
   if (res.ok) {
-    document.getElementById('tos-content-body').textContent = res.data.tos || 'Failed to load ToS';
+    const sections = res.data.sections || {};
+    const head = `<p class="tos-lead">Version ${esc(res.data.version || '')} — the short, human version first. Reading it to the end pays +5 💎, once.</p>`;
+    const blocks = Object.entries(sections).map(([k, v]) =>
+      `<div class="tos-section"><h4>${esc(v.title || k)}</h4><p>${esc(v.body || '')}</p></div>`).join('');
+    const bodyEl = document.getElementById('tos-content-body');
+    bodyEl.innerHTML = head + blocks + (blocks ? '' : `<p>${esc(res.data.tos || 'Failed to load ToS')}</p>`);
+    if (!currentUser.tos_bonus_claimed) {
+      bodyEl.insertAdjacentHTML('beforeend', `
+        <div class="tos-bonus-row">
+          <button class="btn primary" onclick="claimTosBonus()">I have read the terms — claim +5 💎</button>
+        </div>`);
+    }
   }
+}
+
+async function claimTosBonus() {
+  const res = await api('/api/shards/tos_bonus', { method: 'POST' });
+  if (!res.ok) return toast(res.data.error || 'Already claimed', 'warn');
+  currentUser.tos_bonus_claimed = true;
+  if (typeof res.data.balance === 'number') {
+    currentUser.shards = res.data.balance;
+    document.getElementById('shards-count').textContent = res.data.balance.toLocaleString();
+  }
+  toast('+5 Shards for reading the terms 📜', 'success');
+  closeModal();
 }
 
 // ==========  CREDITS MODAL (dynamic color name — B3 fix)  ==========
@@ -467,6 +534,7 @@ function showCreditsModal() {
 async function checkSession() {
   const res = await api('/api/me');
   if (res.data.poll_config) pollConfig = res.data.poll_config;
+  if (res.data.encryption) serverEncryption = res.data.encryption;
   if (res.data.user) {
     currentUser = res.data.user;
     enterApp();
@@ -480,29 +548,24 @@ function enterApp() {
   document.getElementById('my-username').textContent = currentUser.username;
   document.getElementById('empty-username').textContent = currentUser.username;
 
-  // Set avatar with effects
-  const av = document.getElementById('me-avatar');
-  av.textContent = '';
-  av.className = 'avatar lg';
-  if (currentUser.active_effects && currentUser.active_effects.length) {
-    currentUser.active_effects.forEach(ef => av.classList.add(ef));
-  }
-  if (currentUser.avatar_url) {
-    av.innerHTML = `<img src="${esc(currentUser.avatar_url)}" alt="">`;
-    av.style.background = '';
-  } else {
-    av.textContent = currentUser.username[0].toUpperCase();
-    av.style.background = `linear-gradient(135deg, ${currentUser.nickname_color || '#00d9ff'}, #6366f1)`;
-  }
+  // BUG 4: the me-card avatar goes through the one shared renderer
+  paintAvatar(document.getElementById('me-avatar'), currentUser, 'lg');
 
-  // Shards display
+  // Balances (Shards + Cores)
   document.getElementById('shards-count').textContent = (currentUser.shards || 0).toLocaleString();
+  document.getElementById('cores-count').textContent = (currentUser.cores || 0).toLocaleString();
 
   updateTheme(currentUser.theme_color || '#00d9ff');
 
   if (currentUser.is_admin || currentUser.is_owner) {
     document.getElementById('admin-btn').classList.remove('hidden');
   }
+
+  loadBadgeCatalog();
+  initEncryption();
+  refreshDailyButton();
+  loadSpotlight();
+  pollNotifications();
 
   loadConversations();
   startConvListPolling();
@@ -527,43 +590,73 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 async function loadConversations() {
   const res = await api('/api/conversations');
   if (!res.ok) return;
-  const list = document.getElementById('conv-list');
-  const convs = res.data.conversations || [];
+  const conversations = res.data.conversations || [];
 
-  const h = JSON.stringify(convs.map(c => [c.id, c.updated_at, c.muted, c.last_message]));
-  if (h === convListHash) return;
-  convListHash = h;
+  // Previews arrive as ciphertext; decrypt them once, then cache per message
+  await Promise.all(conversations.map(async (c) => {
+    if (!c.last_encrypted || !c.last_message) { c._preview = undefined; return; }
+    const cached = decryptedPreview[c.last_message_id];
+    if (cached !== undefined) { c._preview = cached; return; }
+    const out = await HyperCrypt.decrypt(c.last_message);
+    if (out.text == null) return;               // no key yet: show 🔒
+    const text = out.text || (c.last_has_image ? '📷 Image' : '');
+    decryptedPreview[c.last_message_id] = text;
+    c._preview = text;
+  }));
 
-  list.innerHTML = '';
-  if (convs.length === 0) {
-    list.innerHTML = '<div style="text-align:center; color:var(--text-mute); padding:20px; font-size:12px;">No conversations yet.<br>Start one with the + button.</div>';
-    return;
-  }
+  const container = document.getElementById('conv-list');
+  container.innerHTML = '';
 
-  convs.forEach(c => {
-    const isGroup = c.is_group;
-    const other = isGroup ? null : c.members.find(m => m.id !== currentUser.id);
-    const title = isGroup ? (c.name || 'Group') : (other ? other.username : 'Chat');
-    const color = isGroup ? '#6366f1' : (other ? other.nickname_color : '#00d9ff');
-    const initial = title[0].toUpperCase();
+  conversations.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'conv-item' + (c.id === currentConv ? ' active' : '');
+    item.dataset.id = c.id;
 
-    const div = document.createElement('div');
-    div.className = 'conv-item' + (c.id === currentConv ? ' active' : '');
-    div.dataset.cid = c.id;
-    div.innerHTML = `
-      <div class="avatar sm" style="background: linear-gradient(135deg, ${color}, var(--bg-5)); width:38px; height:38px; font-size:14px;">${esc(initial)}</div>
-      <div class="conv-body">
-        <div class="conv-top">
-          <span class="conv-name">${esc(title)}${isGroup ? ' <span style="opacity:0.5;font-size:10px;">group</span>' : ''}</span>
-          <span class="conv-time">${formatShortTime(c.last_time)}</span>
-        </div>
-        <div class="conv-preview">${esc(c.last_message || 'No messages yet')}</div>
+    let icon, nameText, preview, anonClass = '';
+    if (c.is_group) {
+      icon = '💬';
+      nameText = c.name || 'Group';
+    } else {
+      const partnerUser = (c.members || []).find(u => u.id !== currentUser.id);
+      if (partnerUser && partnerUser.anonymous) {
+        icon = '🕶';
+        nameText = 'Anonymous';
+        anonClass = ' anonymous';
+      } else {
+        icon = (partnerUser ? partnerUser.username : '?')[0].toUpperCase();
+        nameText = partnerUser ? partnerUser.username : 'Unknown';
+      }
+    }
+
+    if (c.last_encrypted) {
+      preview = c._preview === undefined ? '🔒 Encrypted' : esc(c._preview);
+    } else {
+      preview = c.last_message ? esc(c.last_message) : (c.last_has_image ? '📷 Image' : 'No messages yet');
+    }
+
+    const isMineLast = c.last_message && c.last_sender_id === currentUser.id;
+    const previewLine = isMineLast ? `You: ${preview}` : preview;
+
+    // BUG 1: unread badge shows how many, not just a dot
+    const unread = c.unread || 0;
+    const unreadHtml = unread > 0
+      ? `<div class="unread-badge">${unread > 99 ? '99+' : unread}</div>`
+      : '';
+
+    item.innerHTML = `
+      <div class="avatar${anonClass}">${esc(icon)}</div>
+      <div class="conv-meta">
+        <div class="conv-name">${esc(nameText)}</div>
+        <div class="conv-preview">${previewLine}</div>
       </div>
-      ${c.muted ? '<span class="conv-mute-ico">🔕</span>' : ''}
+      ${unreadHtml}
     `;
-    div.addEventListener('click', () => openConversation(c));
-    list.appendChild(div);
+    item.addEventListener('click', () => openConversation(c));
+    container.appendChild(item);
   });
+
+  updateEmptyConversations();
+  refreshFriendBadge();
 }
 
 function startConvListPolling() {
@@ -575,66 +668,98 @@ function openConversation(conv) {
   currentConv = conv.id;
   currentConvMeta = conv;
 
-  document.querySelectorAll('.conv-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.cid === conv.id);
-  });
-
   document.getElementById('empty-state').classList.add('hidden');
   document.getElementById('chat-view').classList.remove('hidden');
+  document.getElementById('msg-input').focus();
 
-  const isGroup = conv.is_group;
-  const other = isGroup ? null : conv.members.find(m => m.id !== currentUser.id);
-  const title = isGroup ? (conv.name || 'Group') : (other ? other.username : 'Chat');
-  const color = isGroup ? '#6366f1' : (other ? other.nickname_color : '#00d9ff');
+  document.querySelectorAll('.conv-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === conv.id);
+  });
 
-  document.getElementById('chat-title').textContent = title;
-  const av = document.getElementById('chat-avatar');
-  av.textContent = title[0].toUpperCase();
-  av.style.background = `linear-gradient(135deg, ${color}, var(--bg-5))`;
+  const nameEl = document.getElementById('chat-title');
+  const avEl = document.getElementById('chat-avatar');
+  const subEl = document.getElementById('chat-subtitle');
+  let avatarUser = null;
 
-  const sub = document.getElementById('chat-subtitle');
-  sub.textContent = isGroup ? `${conv.members.length} members` : '';
+  if (conv.is_group) {
+    nameEl.textContent = '💬 ' + (conv.name || 'Group');
+    subEl.textContent = `${(conv.members || []).length} members`;
+    avEl.className = 'avatar md';
+    avEl.textContent = (conv.name || 'G')[0].toUpperCase();
+    avEl.style.background = 'linear-gradient(135deg, #6366f1, var(--bg-5))';
+    avEl.onclick = () => showGroupInfo();
+  } else {
+    const partnerUser = (conv.members || []).find(u => u.id !== currentUser.id);
+    // BUG 1: anonymity holds in the chat header too
+    if (partnerUser && partnerUser.anonymous) {
+      nameEl.textContent = '🕶 Anonymous';
+      subEl.textContent = '';
+      avEl.className = 'avatar md anonymous';
+      avEl.textContent = '🕶';
+      avEl.onclick = null;
+    } else {
+      nameEl.textContent = partnerUser ? partnerUser.username : 'Chat';
+      subEl.textContent = '';
+      avatarUser = partnerUser;
+    }
+  }
+  if (avatarUser) {
+    paintAvatar(avEl, avatarUser, 'md');
+    avEl.style.cursor = 'pointer';
+    avEl.onclick = () => showUserProfile(avatarUser.username);
+  }
 
-  document.getElementById('group-info-btn').classList.toggle('hidden', !isGroup);
-
+  document.getElementById('group-info-btn').classList.toggle('hidden', !conv.is_group);
   const muteBtn = document.getElementById('mute-btn');
   muteBtn.style.color = conv.muted ? 'var(--warn)' : '';
 
-  msgListHash = '';
-  loadMessages();
-  restartPollingWithNewInterval();
+  // Make sure we hold this conversation's key before the first poll
+  HyperCrypt.ensureConversationKey(api, conv.id, cryptoMembers(), masterPublicKey())
+    .catch(() => {})
+    .finally(() => { msgListHash = ''; loadMessages(); restartPollingWithNewInterval(); });
 }
 
-// ==========  POLLING  ==========
-function computePollInterval() {
-  if (document.hidden) return pollConfig.hidden_ms;
-  if (idleCycles >= pollConfig.very_idle_after_cycles) return pollConfig.very_idle_ms;
-  if (idleCycles >= pollConfig.idle_after_cycles) return pollConfig.idle_ms;
-  return pollConfig.active_ms;
-}
-
-function restartPollingWithNewInterval() {
-  if (pollTimer) clearTimeout(pollTimer);
-  const tick = async () => {
-    if (!currentConv) return;
-    await loadMessages();
-    await checkTyping();
-    pollTimer = setTimeout(tick, computePollInterval());
-  };
-  pollTimer = setTimeout(tick, computePollInterval());
-}
 // ==========  MESSAGES  ==========
 async function loadMessages() {
   if (!currentConv) return;
-  const res = await api(`/api/messages/${currentConv}`);
+  const cid = currentConv;
+  // Incremental polling: the server only sends messages newer than this
+  const since = lastMessageStamp[cid];
+  const res = await api(`/api/messages/${cid}` + (since ? `?since=${encodeURIComponent(since)}` : ''));
   if (!res.ok) return;
+  if (cid !== currentConv) return;   // switched away while it was in flight
 
-  const msgs = res.data.messages || [];
+  let msgs = res.data.messages || [];
+  if (res.data.incremental) {
+    const existing = messageCache[cid] || [];
+    const seen = new Set(existing.map(m => m.id));
+    msgs = existing.concat(msgs.filter(m => !seen.has(m.id)));
+  }
+
+  // Decrypt anything new. Already-decrypted messages are cached so a 2s
+  // poll does not re-run AES on the whole history.
+  let decryptedNew = false;
+  for (const m of msgs) {
+    if (m._text !== undefined) continue;
+    if (!m.encrypted) { m._text = m.content; continue; }
+    const out = await HyperCrypt.decrypt(m.content);
+    m._text = out.text != null ? out.text : null;
+    if (out.text == null && out.reason === 'no_key') {
+      // A conversation key we have not fetched yet (e.g. a group we just joined)
+      await HyperCrypt.ensureConversationKey(api, cid, cryptoMembers(), masterPublicKey());
+      const retry = await HyperCrypt.decrypt(m.content);
+      if (retry.text != null) m._text = retry.text;
+    }
+    decryptedNew = true;
+  }
+
+  messageCache[cid] = msgs;
+  if (msgs.length) lastMessageStamp[cid] = msgs[msgs.length - 1].created_at;
+
   const box = document.getElementById('messages');
   const wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 100;
-
-  const h = JSON.stringify(msgs.map(m => [m.id, m.content, m.image_url, m.reactions, m.read_by, m.deleted, m.is_anonymous]));
-  if (h === msgListHash) {
+  const h = JSON.stringify(msgs.map(m => [m.id, m.created_at, m.reactions, m.read_by, m.is_anonymous]));
+  if (h === msgListHash && !decryptedNew) {
     idleCycles++;
   } else {
     msgListHash = h;
@@ -654,35 +779,33 @@ async function loadMessages() {
 }
 
 function renderMessages(msgs, box, keepScroll) {
+  const wasAtBottom = !keepScroll || isScrolledToBottom(box);
   box.innerHTML = '';
+
   let lastSender = null;
-  let lastDate = null;
   let lastTime = 0;
 
   msgs.forEach((m, i) => {
     const when = new Date(m.created_at);
-    const dayKey = when.toDateString();
-    if (dayKey !== lastDate) {
+    const sender = m.users || {};
+
+    // Insert a date divider when the day changes
+    const prev = i > 0 ? new Date(msgs[i - 1].created_at) : null;
+    if (!prev || prev.toDateString() !== when.toDateString()) {
       const div = document.createElement('div');
       div.className = 'date-divider';
-      div.textContent = formatDayLabel(m.created_at);
+      div.textContent = formatDateDivider(when);
       box.appendChild(div);
-      lastDate = dayKey;
-      lastSender = null;
-      lastTime = 0;
     }
 
-    // Anonymous handling: sender_id is null for anonymous messages from others.
-    // For mine detection, we use `is_anonymous` + a heuristic: if sender_id matches current user, it's mine.
-    // But when the backend hides sender_id for anonymous messages from others, we treat them as "theirs".
     const mine = m.sender_id === currentUser.id;
     const isAnon = m.is_anonymous === true;
 
-    // Group by "sender identity" — anonymous messages don't group with named messages even from same person
+    // Group by "sender identity" — anonymous messages never group
     const senderKey = isAnon ? '_anon_' + (m.id.slice(0, 8)) : (m.sender_id || '_unknown_');
     const sameSender = senderKey === lastSender;
     const closeInTime = (when.getTime() - lastTime) < 5 * 60 * 1000;
-    const grouped = sameSender && closeInTime && !isAnon; // never group anonymous
+    const grouped = sameSender && closeInTime && !isAnon;
 
     let group;
     if (grouped) {
@@ -691,17 +814,27 @@ function renderMessages(msgs, box, keepScroll) {
       group = document.createElement('div');
       group.className = 'msg-group ' + (mine ? 'mine' : 'theirs');
       if (!mine) {
-        let senderName, color, fontClass = '';
+        let senderName, color, fontClass = '', avHtml, badges = '';
         if (isAnon) {
           senderName = 'Anonymous';
           color = 'var(--text-mute)';
+          avHtml = `<div class="avatar xs anonymous" title="Anonymous">🕶</div>`;
         } else {
-          senderName = m.users?.username || 'Unknown';
-          color = m.users?.nickname_color || '#00d9ff';
+          senderName = sender.username || 'Unknown';
+          color = sender.nickname_color || '#00d9ff';
+          fontClass = sender.name_font ? ' font-' + sender.name_font : '';
+          // BUG 4: effects ride on every avatar, not just the sidebar one
+          avHtml = avatarHtml(sender, 'xs', true);
+          badges = badgesHtml(sender.active_badges, { max: 2 });
         }
         const anonTag = isAnon ? ' <span class="anonymous-tag">anon</span>' : '';
         const senderClass = isAnon ? 'msg-sender anonymous' : 'msg-sender';
-        group.innerHTML = `<div class="${senderClass}" style="color: ${esc(color)}">${esc(senderName)}${anonTag}</div>`;
+        const clickName = (!isAnon && sender.username)
+          ? ` onclick="event.stopPropagation(); showUserProfile('${esc(sender.username)}')"`
+          : '';
+        group.innerHTML = `<div class="msg-sender-row">${avHtml}` +
+          `<div><div class="${senderClass}${fontClass}" style="color: ${esc(color)}"${clickName}>${esc(senderName)}${anonTag}</div>` +
+          `${badges}</div></div>`;
       }
       box.appendChild(group);
     }
@@ -714,20 +847,28 @@ function renderMessages(msgs, box, keepScroll) {
     }
     bubble.className = bubbleClass;
 
-    // Apply custom bubble color for mine messages if user has one
     if (mine && currentUser.active_bubble_color) {
       bubble.style.background = currentUser.active_bubble_color;
       bubble.style.color = getContrastColor(currentUser.active_bubble_color);
       bubble.style.boxShadow = '0 2px 8px ' + currentUser.active_bubble_color + '55';
     }
 
+    // Encrypted messages carry their plaintext here once decrypted
+    const text = (m._text !== undefined ? m._text : m.content);
     let inner = '';
     if (m.image_url) {
-      inner += `<img src="${esc(m.image_url)}" class="msg-img" alt="image" onclick="viewImage('${esc(m.image_url)}')">`;
+      if (m.encrypted && !m._blob) {
+        inner += `<img class="msg-img pending" data-msg="${esc(m.id)}" alt="image">`;
+      } else {
+        const src = m._blob || m.image_url;
+        inner += `<img src="${esc(src)}" class="msg-img" alt="image" onclick="viewImage('${esc(src)}')">`;
+      }
     }
-    if (m.content) {
+    if (text) {
       const cls = m.image_url ? 'msg-text' : '';
-      inner += `<div class="${cls}">${esc(m.content)}</div>`;
+      inner += `<div class="${cls}">${esc(text)}</div>`;
+    } else if (!m.image_url && m.encrypted) {
+      inner += `<div class="msg-locked">🔒 encrypted</div>`;
     }
     bubble.innerHTML = inner;
     group.appendChild(bubble);
@@ -742,6 +883,7 @@ function renderMessages(msgs, box, keepScroll) {
       const meta = document.createElement('div');
       meta.className = 'msg-meta';
       let metaHtml = `<span class="msg-time">${formatTime(m.created_at)}</span>`;
+      if (m.encrypted) metaHtml += ` <span class="msg-lock" title="End-to-end encrypted">🔒</span>`;
       metaHtml += ` <button class="react-btn" type="button" onclick="showEmojiPicker(event, '${m.id}')">＋</button>`;
       if (mine && m.read_by && m.read_by.filter(u => u !== currentUser.username).length > 0) {
         metaHtml += ` <span class="msg-seen" title="Seen">✓✓</span>`;
@@ -757,29 +899,60 @@ function renderMessages(msgs, box, keepScroll) {
         counts[r.emoji].count++;
         if (r.user_id === currentUser.id) counts[r.emoji].mine = true;
       });
-      const rw = document.createElement('div');
-      rw.className = 'msg-reactions';
-      rw.innerHTML = Object.entries(counts).map(([em, d]) =>
-        `<span class="reaction ${d.mine ? 'mine' : ''}" onclick="toggleReaction('${m.id}', '${esc(em)}')">${esc(em)} ${d.count}</span>`
-      ).join('');
-      group.appendChild(rw);
-    }
-
-    // Add click handler to sender name to open profile card (non-anonymous only)
-    if (!mine && !isAnon && m.users?.username) {
-      const senderEl = group.querySelector('.msg-sender');
-      if (senderEl && !senderEl.dataset.hooked) {
-        senderEl.style.cursor = 'pointer';
-        senderEl.dataset.hooked = '1';
-        senderEl.addEventListener('click', () => showUserProfile(m.users.username));
-      }
+      Object.entries(counts).forEach(([emoji, info]) => {
+        const chip = document.createElement('button');
+        chip.className = 'reaction' + (info.mine ? ' mine' : '');
+        chip.type = 'button';
+        chip.innerHTML = `${esc(emoji)} <span>${info.count}</span>`;
+        chip.addEventListener('click', () => {
+          api(`/api/messages/${currentConv}/react`, {
+            method: 'POST',
+            body: { message_id: m.id, emoji }
+          }).then(() => { msgListHash = ''; loadMessages(); });
+        });
+        group.appendChild(chip);
+      });
     }
 
     lastSender = senderKey;
     lastTime = when.getTime();
   });
 
-  if (keepScroll) box.scrollTop = box.scrollHeight;
+  if (!msgs.length) {
+    box.innerHTML = '<div class="empty-msgs">No messages yet. Say something.</div>';
+  } else if (wasAtBottom) {
+    requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+  }
+  resolveEncryptedImages(box);
+}
+
+/* Fill in attachments that arrived as ciphertext. The file lives on a private
+   bucket; the browser fetches it through /api/file/<path>?cid=..., which the
+   server only serves to a member of that conversation. */
+async function resolveEncryptedImages(box) {
+  const pending = box.querySelectorAll('img.pending[data-msg]');
+  const list = messageCache[currentConv] || [];
+  for (const img of pending) {
+    const msg = list.find(m => m.id === img.dataset.msg);
+    if (!msg || !msg.image_url) continue;
+    if (msg._blob) {
+      img.classList.remove('pending');
+      img.src = msg._blob;
+      img.onclick = () => viewImage(msg._blob);
+      continue;
+    }
+    try {
+      const path = msg.image_url.replace(/^\/(api\/file\/)?/, '');
+      const url = `/api/file/${encodeURI(path)}?cid=${encodeURIComponent(currentConv)}`;
+      msg._blob = await HyperCrypt.decryptImageBlob(url);
+      img.classList.remove('pending');
+      img.src = msg._blob;
+      img.onclick = () => viewImage(msg._blob);
+    } catch (err) {
+      img.classList.remove('pending');
+      img.alt = '🔒 image could not be decrypted';
+    }
+  }
 }
 
 function getContrastColor(hex) {
@@ -855,8 +1028,22 @@ document.getElementById('msg-form').addEventListener('submit', async (e) => {
   if (!content && !pendingImage) return;
   if (!currentConv) return;
 
-  const body = { content };
-  if (pendingImage) body.image_data = pendingImage;
+  // HyperCrypt: the plaintext never leaves this device unencrypted
+  let body;
+  if (encryptionReady) {
+    try {
+      await HyperCrypt.ensureConversationKey(api, currentConv, cryptoMembers(), masterPublicKey());
+      body = { content: await HyperCrypt.encrypt(api, currentConv, cryptoMembers(), content) };
+      if (pendingImage) body.image_data = await encryptImageForSend(pendingImage);
+    } catch (err) {
+      toast('Could not encrypt this message: ' + (err && err.message || err), 'error', 6000);
+      input.value = content;
+      return;
+    }
+  } else {
+    body = { content };
+    if (pendingImage) body.image_data = pendingImage;
+  }
 
   input.value = '';
   const imgToSend = pendingImage;
@@ -865,7 +1052,7 @@ document.getElementById('msg-form').addEventListener('submit', async (e) => {
   const res = await api(`/api/messages/${currentConv}`, { method: 'POST', body });
 
   if (res.data.blocked) {
-    toast(res.data.error, 'error', 6000);
+    showWarningModal({ body: res.data.error });
     return;
   }
   if (!res.ok) {
@@ -876,7 +1063,8 @@ document.getElementById('msg-form').addEventListener('submit', async (e) => {
   }
 
   if (res.data.warning) {
-    toast(res.data.warning, 'warn', 6000);
+    // Big centered warning with the sarcastic quip + the Sorry button
+    showWarningModal({ body: res.data.warning });
   }
   if (res.data.throttle_delay) {
     toast(`You are throttled. Messages send with a delay.`, 'warn', 3000);
@@ -1236,7 +1424,9 @@ async function openFromSearch(cid) {
 }
 
 // ==========  INVITES  ==========
-document.getElementById('invites-btn').addEventListener('click', showInvitesModal);
+// The sidebar button is gone (invites were superseded by promo codes), but
+// the modal and the /api/invites backend stay intact for existing links.
+// eslint-disable-next-line no-unused-vars
 
 async function showInvitesModal() {
   const res = await api('/api/invites');
@@ -1334,13 +1524,48 @@ function showSettingsModal() {
       <input type="checkbox" id="s-lb" ${u.leaderboard_opt_out ? 'checked' : ''}>
     </div>
 
+    <div class="setting-row">
+      <div class="setting-info">
+        <div class="setting-label">Streamer mode</div>
+        <div class="setting-desc">Blur names, avatars and previews so nobody shoulder-surfs your chats</div>
+      </div>
+      <input type="checkbox" id="s-streamer" ${u.streamer_mode && u.streamer_mode.enabled ? 'checked' : ''}>
+    </div>
+    <div class="setting-row">
+      <div class="setting-info">
+        <div class="setting-label">Friend requests</div>
+        <div class="setting-desc">Who is allowed to add you</div>
+      </div>
+      <select id="s-friends" class="mini-select">
+        <option value="open" ${u.friend_privacy === 'open' ? 'selected' : ''}>Everyone adds me instantly</option>
+        <option value="approval" ${u.friend_privacy === 'approval' ? 'selected' : ''}>I approve each request</option>
+        <option value="closed" ${u.friend_privacy === 'closed' ? 'selected' : ''}>Nobody can add me</option>
+      </select>
+    </div>
+
     <h4>Profile</h4>
+    <div class="setting-row">
+      <div class="setting-info">
+        <div class="setting-label">Username</div>
+        <div class="setting-desc">${esc(u.username)} — you can change it a few times an hour</div>
+      </div>
+      <button class="btn-mini" type="button" onclick="showChangeUsernameModal()">Change</button>
+    </div>
     <div class="field">
       <label>Bio</label>
       <textarea id="s-bio" rows="2" maxlength="160" placeholder="Tell people about you (max 160 chars)">${esc(u.bio || '')}</textarea>
     </div>
 
     <button class="btn primary" style="margin-top: 12px;" onclick="saveSettings()">Save changes</button>
+
+    <h4>🔐 Encryption</h4>
+    <div class="setting-row">
+      <div class="setting-info">
+        <div class="setting-label">HyperCrypt identity</div>
+        <div class="setting-desc" id="s-enc-status">${encryptionReady ? 'Active on this device' : 'Setting up…'}</div>
+      </div>
+      <button class="btn-mini" type="button" onclick="showEncryptionModal()">Details</button>
+    </div>
 
     <h4>Security</h4>
     <button class="btn secondary" onclick="showChangePasswordModal()" style="margin-bottom: 8px;">Change password</button>
@@ -1370,19 +1595,21 @@ async function saveSettings() {
     keep_all_forever: document.getElementById('s-keep').checked,
     notify_before_delete: document.getElementById('s-notify').checked,
     leaderboard_opt_out: document.getElementById('s-lb').checked,
+    friend_privacy: document.getElementById('s-friends').value,
     bio: document.getElementById('s-bio').value
   };
   const res = await api('/api/profile', { method: 'POST', body });
-  if (!res.ok) return toast('Save failed', 'error');
+  if (!res.ok) return toast(res.data.error || 'Save failed', 'error');
+
+  // Streamer mode lives on its own endpoint (JSONB toggles + global forces)
+  const streamerOn = document.getElementById('s-streamer').checked;
+  const sr = await api('/api/settings/streamer', { method: 'POST', body: { enabled: streamerOn } });
+  if (sr.ok) currentUser.streamer_mode = sr.data.streamer_mode || currentUser.streamer_mode;
+
   Object.assign(currentUser, body);
-  // Update theme color name for credits joke
   currentUser.theme_color_name = getColorNameClient(body.theme_color);
   updateTheme(body.theme_color);
-  // Update me-avatar background
-  const av = document.getElementById('me-avatar');
-  if (!currentUser.avatar_url) {
-    av.style.background = `linear-gradient(135deg, ${body.nickname_color}, #6366f1)`;
-  }
+  paintAvatar(document.getElementById('me-avatar'), currentUser, 'lg');
   toast('Settings saved', 'success');
   closeModal();
   convListHash = '';
@@ -1508,8 +1735,8 @@ async function doDeleteAccount() {
   setTimeout(() => location.reload(), 1500);
 }
 
-// ==========  MY PROFILE (from sidebar button)  ==========
-document.getElementById('profile-btn').addEventListener('click', () => {
+// ==========  MY PROFILE (the me-card is the button now)  ==========
+document.getElementById('me-card').addEventListener('click', () => {
   showUserProfile(currentUser.username);
 });
 
@@ -1562,14 +1789,18 @@ function renderShopModal() {
     `<button class="shop-cat ${c.key === currentShopCategory ? 'active' : ''}" onclick="switchShopCat('${c.key}')">${c.label}</button>`
   ).join('');
 
-  const items = shopItemsCache.filter(i => i.category === currentShopCategory);
+  const items = shopItemsCache.filter(i => i.category === currentShopCategory
+    && (i.currency || 'shards') === shopCurrency);
   const cards = items.map(item => renderShopItem(item)).join('');
 
   showModal(`
     <h3>🛒 <span class="accent">Shop</span></h3>
     <div class="shop-header">
-      <div class="shop-balance">💎 ${(currentUser.shards || 0).toLocaleString()}</div>
-      <span style="color: var(--text-dim); font-size: 12px;">Your Shards</span>
+      <div class="shop-balance">💎 ${(currentUser.shards || 0).toLocaleString()} &nbsp;·&nbsp; 🪙 ${(currentUser.cores || 0).toLocaleString()}</div>
+      <div class="shop-toggle">
+        <button class="shop-cur ${shopCurrency === 'shards' ? 'active' : ''}" onclick="switchShopCurrency('shards')">💎 Shards</button>
+        <button class="shop-cur ${shopCurrency === 'cores' ? 'active' : ''}" onclick="switchShopCurrency('cores')">🪙 Cores</button>
+      </div>
     </div>
     <div class="shop-categories">${catButtons}</div>
     <div class="shop-grid">${cards || '<p style="grid-column: 1/-1; text-align: center; color: var(--text-mute); padding: 20px;">No items in this category</p>'}</div>
@@ -1581,10 +1812,18 @@ function switchShopCat(cat) {
   renderShopModal();
 }
 
+function switchShopCurrency(cur) {
+  shopCurrency = cur;
+  renderShopModal();
+}
+
 function renderShopItem(item) {
   const owned = item.owned;
   const equipped = item.equipped;
-  const canAfford = (currentUser.shards || 0) >= item.price;
+  const cur = (item.currency || 'shards');
+  const curIcon = cur === 'cores' ? '🪙' : '💎';
+  const balance = cur === 'cores' ? (currentUser.cores || 0) : (currentUser.shards || 0);
+  const canAfford = balance >= item.price;
   const isPerk = item.category === 'perks';
   const isCosmeticEquippable = ['avatar_effects', 'badges', 'chat'].includes(item.category);
 
@@ -1633,13 +1872,13 @@ function renderShopItem(item) {
   }
 
   return `
-    <div class="shop-item ${owned ? 'owned' : ''} ${equipped ? 'equipped' : ''}">
+    <div class="shop-item ${owned ? 'owned' : ''} ${equipped ? 'equipped' : ''} ${cur === 'cores' ? 'cores-card' : ''}">
       ${badge}
       <div class="shop-item-icon">${esc(item.icon || '💎')}</div>
       <div class="shop-item-name">${esc(item.name)}</div>
       <div class="shop-item-desc">${esc(item.description || '')}</div>
       <div class="shop-item-footer">
-        <div class="shop-item-price">💎 ${item.price}</div>
+        <div class="shop-item-price">${curIcon} ${item.price}</div>
         ${footerBtn}
       </div>
     </div>
@@ -1649,15 +1888,46 @@ function renderShopItem(item) {
 async function buyItem(itemId) {
   const res = await api(`/api/shop/buy/${itemId}`, { method: 'POST' });
   if (!res.ok) return toast(res.data.error || 'Purchase failed', 'error');
-  toast('Purchased! 💎', 'success');
+  toast('Purchased!', 'success');
   if (typeof res.data.new_balance === 'number') {
-    currentUser.shards = res.data.new_balance;
-    document.getElementById('shards-count').textContent = res.data.new_balance.toLocaleString();
+    if (res.data.currency === 'cores') {
+      currentUser.cores = res.data.new_balance;
+      document.getElementById('cores-count').textContent = res.data.new_balance.toLocaleString();
+    } else {
+      currentUser.shards = res.data.new_balance;
+      document.getElementById('shards-count').textContent = res.data.new_balance.toLocaleString();
+    }
   }
-  // Refresh shop
   const r = await api('/api/shop/items');
   shopItemsCache = r.data.items || [];
+  // The spec asks every purchase to offer a "go use it now" button
+  if (res.data.next_action && res.data.next_action.action && res.data.next_action.action !== 'none') {
+    const na = res.data.next_action;
+    showModal(`
+      <h3>✨ <span class="accent">Purchased!</span></h3>
+      <p style="color: var(--text-mute); margin: 8px 0 16px;">Nice. Want to put it to work right away?</p>
+      <div class="modal-actions">
+        <button class="btn primary" onclick='runNextAction(${esc(JSON.stringify(na))})'>${esc(na.label || 'Use it now')}</button>
+        <button class="btn secondary" onclick="closeModal(); showShopModal();">Back to shop</button>
+      </div>
+    `);
+    return;
+  }
   renderShopModal();
+}
+
+function runNextAction(na) {
+  closeModal();
+  switch (na.action) {
+    case 'admin_panel': document.getElementById('admin-btn').click(); break;
+    case 'settings': showSettingsModal(); break;
+    case 'avatar': uploadAvatarFlow(); break;
+    case 'bots': showMyBotsModal(); break;
+    case 'spotlight': showSpotlightSetup(na); break;
+    case 'equip_chat': showShopModal(); switchShopCat('chat'); break;
+    case 'group_icon': toast('Pick a group and change its icon from the chat header.', 'info', 6000); break;
+    default: showShopModal();
+  }
 }
 
 async function equipItem(itemId, equip) {
@@ -1681,6 +1951,7 @@ async function equipChatOption(itemId, itemKey, value) {
 
 async function refreshCurrentUser() {
   const res = await api('/api/me');
+  if (res.data.encryption) serverEncryption = res.data.encryption;
   if (res.data.user) {
     currentUser = res.data.user;
     // Update me-avatar effects
@@ -1869,14 +2140,16 @@ async function showUserProfile(username) {
   if (!res.ok) return toast(res.data.error || 'Failed to load profile', 'error');
   const u = res.data.user;
   const memberSince = u.created_at ? formatDate(u.created_at) : 'unknown';
+  const streamer = currentUser.streamer_mode && currentUser.streamer_mode.enabled;
+
+  // Streamer mode blurs identity on screen
+  const blurClass = streamer && !u.is_self ? ' streamer-blur' : '';
 
   const avatar = avatarHtml(u, 'xl');
   const badges = u.active_badges && u.active_badges.length
-    ? `<div class="profile-badges">${badgesHtml(u.active_badges)}</div>`
+    ? `<div class="profile-badges">${badgesHtml(u.active_badges, { size: 'lg' })}</div>`
     : '';
-  const bio = u.bio
-    ? `<div class="profile-bio">${esc(u.bio)}</div>`
-    : '';
+  const bio = u.bio ? `<div class="profile-bio">${esc(u.bio)}</div>` : '';
   const stats = u.hidden ? '' : `
     <div class="profile-stats">
       <div class="profile-stat">
@@ -1884,19 +2157,56 @@ async function showUserProfile(username) {
         <div class="profile-stat-label">Shards</div>
       </div>
       <div class="profile-stat">
-        <div class="profile-stat-num">${u.referrals || 0}</div>
+        <div class="profile-stat-num">${u.total_messages_sent != null ? u.total_messages_sent.toLocaleString() : '—'}</div>
+        <div class="profile-stat-label">Messages</div>
+      </div>
+      <div class="profile-stat">
+        <div class="profile-stat-num">${u.referrals != null ? u.referrals : '—'}</div>
         <div class="profile-stat-label">Referrals</div>
+      </div>
+      <div class="profile-stat">
+        <div class="profile-stat-num">${u.no_warning_streak_days != null ? u.no_warning_streak_days + 'd' : '—'}</div>
+        <div class="profile-stat-label">Clean streak</div>
       </div>
     </div>
   `;
 
+  const fs = u.friendship || { state: 'none' };
+  let friendBtn = '';
+  if (!u.is_self) {
+    if (fs.state === 'friends') {
+      friendBtn = `<button class="btn-mini ghost" onclick="unfriend('${fs.friendship_id}')">Unfriend</button>`;
+    } else if (fs.state === 'pending_out') {
+      friendBtn = `<button class="btn-mini ghost" disabled>Requested…</button>`;
+    } else if (fs.state === 'pending_in') {
+      friendBtn = `<button class="btn-mini success" onclick="respondFriend('${fs.friendship_id}', true)">Accept request</button>`;
+    } else {
+      friendBtn = `<button class="btn-mini" onclick="requestFriend('${esc(u.username)}')">Add friend</button>`;
+    }
+  }
+
+  const actions = u.is_self ? `
+    <div class="profile-actions">
+      <button class="btn secondary" onclick="closeProfileCard(); showSettingsModal();">Edit profile</button>
+    </div>` : `
+    <div class="profile-actions">
+      <button class="btn primary" onclick="closeProfileCard(); messageUser('${esc(u.username)}')">💬 Message</button>
+      <button class="btn secondary" onclick="showGiftModal('${esc(u.username)}')">🎁 Gift</button>
+      ${friendBtn}
+      <button class="btn-mini danger" onclick="reportUser('${esc(u.username)}')">Report</button>
+    </div>`;
+
   showProfileCard(`
-    ${avatar}
-    <div class="profile-name" style="color: ${esc(u.nickname_color || '#00d9ff')}">${esc(u.username)}</div>
-    <div class="profile-since">Member since ${memberSince}</div>
-    ${badges}
-    ${bio}
-    ${stats}
+    <div class="profile-banner" style="background: linear-gradient(135deg, ${esc(u.banner_color || u.nickname_color || '#00d9ff')}, #0b0e14)"></div>
+    <div class="profile-card-body${blurClass}">
+      ${avatar}
+      <div class="profile-name" style="color: ${esc(u.nickname_color || '#00d9ff')}${u.name_font ? '' : ''}">${esc(u.username)}${u.is_bot ? ' <span class="bot-tag">BOT</span>' : ''}</div>
+      <div class="profile-since">Member since ${memberSince}</div>
+      ${badges}
+      ${bio}
+      ${stats}
+      ${actions}
+    </div>
   `);
 }
 
@@ -1917,6 +2227,12 @@ document.getElementById('admin-btn').addEventListener('click', () => {
       ${(isOwner || perms.can_view_messages) ? `<button class="admin-tab" onclick="switchAdmin(this,'emerg')">Emergency</button>` : ''}
       ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'rights')">Admin Rights</button>` : ''}
       ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'set')">Settings</button>` : ''}
+      ${isOwner || perms.can_grant_cores ? `<button class="admin-tab" onclick="switchAdmin(this,'cores')">Cores</button>` : ''}
+      ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'badges')">Badges</button>` : ''}
+      ${isOwner || perms.can_suspend_ban_users ? `<button class="admin-tab" onclick="switchAdmin(this,'bots')">Bots</button>` : ''}
+      ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'ask')">Ask Nicely</button>` : ''}
+      ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'apps')">Applications</button>` : ''}
+      ${isOwner ? `<button class="admin-tab" onclick="switchAdmin(this,'padm')">Purchased admins</button>` : ''}
       <button class="admin-tab" onclick="switchAdmin(this,'audit')">Audit log</button>
       <button class="admin-tab" onclick="switchAdmin(this,'spam')">Spam</button>
     </div>
@@ -1938,6 +2254,12 @@ function switchAdmin(btn, tab) {
     emerg: loadAdminEmergency,
     rights: loadAdminRights,
     set: loadAdminSettings,
+    cores: loadAdminCores,
+    badges: loadAdminBadges,
+    bots: loadAdminBots,
+    ask: loadAdminAskNicely,
+    apps: loadAdminApplications,
+    padm: loadAdminPurchased,
     audit: loadAdminAudit,
     spam: loadAdminSpam
   }[tab];
@@ -2682,6 +3004,672 @@ function dismissAnnouncement(id) {
   localStorage.setItem('cipher_dismissed_anns', JSON.stringify(dismissedAnns));
   document.getElementById('announcement-bar').classList.add('hidden');
 }
+
+
+// ============================================================
+//   v1.2 UI — HyperCrypt, economy, social, safety, admin
+// ============================================================
+let serverEncryption = null;
+let pendingUnlockPassword = null;
+
+// ---------- small helpers ----------
+function paintAvatar(el, user, size) {
+  if (!el) return;
+  el.className = `avatar ${size} ${((user && user.active_effects) || []).join(' ')}`;
+  el.textContent = '';
+  el.style.background = '';
+  el.onclick = null;
+  if (user && user.avatar_url) {
+    el.innerHTML = `<img src="${esc(user.avatar_url)}" alt="">`;
+  } else {
+    el.textContent = (((user && user.username) || '?')[0] || '?').toUpperCase();
+    el.style.background = `linear-gradient(135deg, ${(user && user.nickname_color) || '#00d9ff'}, #6366f1)`;
+  }
+}
+
+function isScrolledToBottom(box) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 100;
+}
+
+function formatDateDivider(d) {
+  const today = new Date();
+  const yest = new Date(Date.now() - 86400000);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yest.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+function updateEmptyConversations() {
+  const list = document.getElementById('conv-list');
+  let hint = document.getElementById('conv-empty-hint');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.id = 'conv-empty-hint';
+    hint.className = 'conv-empty';
+    hint.innerHTML = 'No conversations yet.<br>Start one with the + button.';
+    list.parentNode.appendChild(hint);
+  }
+  hint.classList.toggle('hidden', list.children.length > 0);
+}
+
+function computePollInterval() {
+  if (document.hidden) return pollConfig.hidden_ms;
+  if (idleCycles >= pollConfig.very_idle_after_cycles) return pollConfig.very_idle_ms;
+  if (idleCycles >= pollConfig.idle_after_cycles) return pollConfig.idle_ms;
+  return pollConfig.active_ms;
+}
+
+function restartPollingWithNewInterval() {
+  if (pollTimer) clearTimeout(pollTimer);
+  const tick = async () => {
+    if (!currentConv) return;
+    await loadMessages();
+    await checkTyping();
+    pollTimer = setTimeout(tick, computePollInterval());
+  };
+  pollTimer = setTimeout(tick, computePollInterval());
+}
+
+// ---------- encryption plumbing ----------
+function cryptoMembers() {
+  const meta = currentConvMeta || {};
+  return (meta.members || [])
+    .filter(m => m && m.id && m.username)
+    .map(m => ({ id: m.id, username: m.username }));
+}
+
+function masterPublicKey() {
+  return (serverEncryption && serverEncryption.master_key) || null;
+}
+
+async function initEncryption() {
+  if (!window.HyperCrypt || !HyperCrypt.isSupported()) {
+    encryptionReady = false;
+    return;
+  }
+  if (serverEncryption && serverEncryption.master_key) {
+    HyperCrypt.setMasterKey(serverEncryption.master_key);
+  }
+  try {
+    await HyperCrypt.ensureIdentity(api, pendingUnlockPassword || '', currentUser.username);
+    pendingUnlockPassword = null;
+    encryptionReady = true;
+    try { await HyperCrypt.loadAllKeys(api); } catch (e) {}
+    const st = document.getElementById('s-enc-status');
+    if (st) st.textContent = 'Active on this device';
+    // Re-decrypt any previews now that keys exist
+    decryptedPreview = {};
+    loadConversations();
+  } catch (err) {
+    if (err && err.needPassword) {
+      showUnlockModal();
+    } else {
+      encryptionReady = false;
+      console.warn('[HyperCrypt]', err);
+    }
+  }
+}
+
+function showUnlockModal() {
+  showModal(`
+    <h3>🔐 <span class="accent">Unlock HyperCrypt</span></h3>
+    <p style="color: var(--text-mute); margin-bottom: 12px;">
+      This account has an encryption identity from another device.
+      Type your password to restore it — the password never leaves this device.
+    </p>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="unlock-password" placeholder="Your password">
+    </div>
+    <p id="unlock-msg" class="form-msg"></p>
+    <button class="btn primary" onclick="doUnlock()">Unlock</button>
+  `);
+  const go = (e) => { if (e.key === 'Enter') doUnlock(); };
+  document.getElementById('unlock-password').addEventListener('keydown', go);
+  document.getElementById('unlock-password').focus();
+}
+
+async function doUnlock() {
+  const pw = document.getElementById('unlock-password').value;
+  pendingUnlockPassword = pw;
+  closeModal();
+  await initEncryption();
+  if (!encryptionReady) {
+    toast('Could not restore your key. You can try again from Settings.', 'warn', 6000);
+  }
+}
+
+function showEncryptionModal() {
+  const info = (window.HyperCrypt && HyperCrypt.publicInfo()) || {};
+  const fp = info.fingerprint || '—';
+  showModal(`
+    <h3>🔐 <span class="accent">How your messages stay private</span></h3>
+    <div class="tos-content">
+      <p>Messages are sealed on your device with a key only you and the person
+      you chat with hold. The server stores ciphertext it cannot read.</p>
+      <p>Your identity key never leaves this device unencrypted; the copy on the
+      server is wrapped with a key derived from your password.</p>
+      <p class="dim">Key fingerprint: <code>${esc(fp)}</code></p>
+      <p class="dim">Full details live in the Terms of Service and the
+      "How it works" panel.</p>
+    </div>
+  `, true);
+}
+
+async function encryptImageForSend(dataUrl) {
+  // dataUrl -> ArrayBuffer -> HyperCrypt ciphertext (base64)
+  const res = await fetch(dataUrl);
+  const buf = await res.arrayBuffer();
+  return await HyperCrypt.encryptImage(api, currentConv, cryptoMembers(), buf);
+}
+
+// ---------- daily bonus ----------
+async function refreshDailyButton() {
+  const btn = document.getElementById('daily-btn');
+  if (!btn) return;
+  const res = await api('/api/shards/daily');
+  if (res.ok && res.data.available) btn.classList.remove('hidden');
+  else btn.classList.add('hidden');
+}
+
+async function claimDailyBonus() {
+  const res = await api('/api/shards/daily', { method: 'POST' });
+  if (!res.ok) return toast(res.data.error || 'Not available yet', 'warn');
+  if (typeof res.data.balance === 'number') {
+    currentUser.shards = res.data.balance;
+    document.getElementById('shards-count').textContent = res.data.balance.toLocaleString();
+  }
+  toast(res.data.message || '+1 Shard 🎁', 'success');
+  refreshDailyButton();
+}
+
+function showCoresModal() {
+  api('/api/cores/history').then(res => {
+    const tx = res.data.transactions || [];
+    const rows = tx.map(t => `
+      <tr>
+        <td>${esc(t.reason || t.type || 'grant')}</td>
+        <td style="color:${(t.amount || 0) >= 0 ? 'var(--success)' : 'var(--danger)'}">${(t.amount || 0) >= 0 ? '+' : ''}${t.amount}</td>
+        <td style="color: var(--text-mute); font-size: 11px;">${new Date(t.created_at).toLocaleString()}</td>
+      </tr>`).join('');
+    showModal(`
+      <h3>🪙 <span class="accent">Cores</span> — <span style="color:var(--gold)">${(currentUser.cores || 0).toLocaleString()}</span></h3>
+      <p style="color: var(--text-mute); margin-bottom: 10px;">Cores are granted by a person, never earned by grinding. Spend them in the Cores shop tab.</p>
+      <table class="table"><thead><tr><th>Reason</th><th>Amount</th><th>When</th></tr></thead>
+      <tbody>${rows || '<tr class="empty-row"><td colspan="3">No Core activity yet</td></tr>'}</tbody></table>
+      <button class="btn secondary" onclick="showShopModal(); switchShopCurrency('cores');">Open the Cores shop</button>
+    `, true, true);
+  });
+}
+
+// ---------- badges catalog ----------
+async function loadBadgeCatalog() {
+  const res = await api('/api/badges/catalog');
+  if (res.ok && res.data.badges) {
+    badgeCatalog = res.data.badges;
+  }
+}
+
+// ---------- spotlight ----------
+async function loadSpotlight() {
+  const bar = document.getElementById('spotlight-bar');
+  if (!bar) return;
+  const res = await api('/api/spotlight');
+  const sp = res.data.spotlight;
+  if (!sp) { bar.classList.add('hidden'); return; }
+  const u = sp.users || {};
+  const name = (currentUser.streamer_mode && currentUser.streamer_mode.enabled) ? 'Someone' : (u.username || 'Someone');
+  bar.innerHTML = `
+    <span class="spotlight-star">✨</span>
+    <span class="spotlight-text"><b style="color:${esc(u.nickname_color || '#ffd700')}">${esc(name)}</b> is in the spotlight${sp.message ? ` — “${esc(sp.message)}”` : ''}</span>
+    <button class="link small" type="button" onclick="showUserProfile('${esc(u.username || '')}')">Say hi</button>
+  `;
+  bar.classList.remove('hidden');
+}
+
+function showSpotlightSetup(na) {
+  showModal(`
+    <h3>✨ <span class="accent">Start your spotlight</span></h3>
+    <p style="color: var(--text-mute); margin-bottom: 10px;">You own a spotlight coupon. Pick what the banner says (or leave it classic).</p>
+    <div class="field">
+      <label>Banner message (optional, max 100 chars)</label>
+      <input type="text" id="sp-msg" maxlength="100" placeholder="e.g. just hit a 30-day streak 🔥">
+    </div>
+    <p id="sp-msg-err" class="form-msg"></p>
+    <button class="btn primary" onclick="startSpotlight('${esc((na && na.item_key) || 'cores_spotlight_basic')}')">Go live for 24h</button>
+  `);
+}
+
+async function startSpotlight(itemKey) {
+  const msg = (document.getElementById('sp-msg') || {}).value || '';
+  const res = await api('/api/spotlight', { method: 'POST', body: { item_key: itemKey, message: msg } });
+  if (!res.ok) {
+    document.getElementById('sp-msg-err').textContent = res.data.error || 'Failed';
+    return;
+  }
+  toast('You are in the spotlight ✨', 'success');
+  closeModal();
+  loadSpotlight();
+}
+
+// ---------- notifications ----------
+async function pollNotifications() {
+  const res = await api('/api/notifications');
+  const badge = document.getElementById('notifications-badge');
+  if (badge) {
+    const n = res.data.unread || 0;
+    badge.textContent = n > 99 ? '99+' : n;
+    badge.classList.toggle('hidden', n === 0);
+  }
+  if (notificationTimer) clearTimeout(notificationTimer);
+  notificationTimer = setTimeout(pollNotifications, 30000);
+}
+
+function showNotificationsModal() {
+  api('/api/notifications').then(res => {
+    const notes = res.data.notifications || [];
+    const rows = notes.map(nt => `
+      <div class="note-row ${nt.read ? '' : 'unread'}" onclick="readNote('${nt.id}')">
+        <div class="note-icon">${esc(nt.icon || '🔔')}</div>
+        <div class="note-body">
+          <div class="note-title">${esc(nt.title || 'Notification')}</div>
+          <div class="note-text">${esc(nt.body || '')}</div>
+        </div>
+        <div class="note-time">${new Date(nt.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+      </div>`).join('');
+    showModal(`
+      <h3>🔔 <span class="accent">Notifications</span></h3>
+      <div class="note-list">${rows || '<p style="color: var(--text-mute); text-align:center; padding: 20px;">Nothing yet.</p>'}</div>
+      <button class="btn secondary" onclick="api('/api/notifications/read_all', { method: 'POST' }).then(() => { pollNotifications(); showNotificationsModal(); })">Mark all read</button>
+    `, true, true);
+  });
+}
+
+async function readNote(id) {
+  await api(`/api/notifications/${id}/read`, { method: 'POST' });
+  pollNotifications();
+  showNotificationsModal();
+}
+
+// ---------- friends ----------
+async function refreshFriendBadge() {
+  const res = await api('/api/friends');
+  const badge = document.getElementById('friends-badge');
+  if (!badge) return;
+  const n = (res.data.incoming || []).length;
+  badge.textContent = n;
+  badge.classList.toggle('hidden', n === 0);
+}
+
+function showFriendsModal() {
+  api('/api/friends').then(res => {
+    const incoming = res.data.incoming || [];
+    const friends = res.data.friends || [];
+    const outgoing = res.data.outgoing || [];
+    const person = (f, extra) => `
+      <div class="friend-row">
+        <div class="avatar" style="background: linear-gradient(135deg, ${esc(f.nickname_color || '#00d9ff')}, #6366f1)">${esc((f.username || '?')[0].toUpperCase())}</div>
+        <div class="friend-name" onclick="closeModal(); showUserProfile('${esc(f.username)}')" style="cursor:pointer">${esc(f.username)}</div>
+        ${extra}
+      </div>`;
+    const inc = incoming.map(f => person(f, `
+      <button class="btn-mini success" onclick="respondFriend('${f.friendship_id}', true)">Accept</button>
+      <button class="btn-mini ghost" onclick="respondFriend('${f.friendship_id}', false)">Ignore</button>`)).join('');
+    const fr = friends.map(f => person(f, `
+      <button class="btn-mini ghost" onclick="unfriend('${f.friendship_id}')">Remove</button>`)).join('');
+    const out = outgoing.map(f => person(f, `<span class="dim" style="font-size:11px">pending</span>`)).join('');
+    showModal(`
+      <h3>👥 <span class="accent">Friends</span></h3>
+      ${incoming.length ? `<h4>Requests</h4>${inc}` : ''}
+      <h4>Your friends (${friends.length})</h4>${fr || '<p class="dim">No friends yet.</p>'}
+      ${outgoing.length ? `<h4>Sent</h4>${out}` : ''}
+    `, true, true);
+  });
+}
+
+async function requestFriend(username) {
+  const res = await api('/api/friends/request', { method: 'POST', body: { username } });
+  if (!res.ok) return toast(res.data.error || 'Could not send request', 'warn');
+  toast(res.data.message || 'Friend request sent', 'success');
+  showUserProfile(username);
+}
+
+async function respondFriend(fid, accept) {
+  const res = await api(`/api/friends/${fid}/respond`, { method: 'POST', body: { accept } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  refreshFriendBadge();
+  showFriendsModal();
+}
+
+async function unfriend(fid) {
+  const res = await api(`/api/friends/${fid}`, { method: 'DELETE' });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  refreshFriendBadge();
+  showFriendsModal();
+}
+
+// ---------- gifting ----------
+function showGiftModal(username) {
+  showModal(`
+    <h3>🎁 <span class="accent">Gift Shards</span> to ${esc(username)}</h3>
+    <div class="field">
+      <label>Amount</label>
+      <input type="number" id="gift-amount" min="1" value="5">
+    </div>
+    <div class="field">
+      <label>Note (optional)</label>
+      <input type="text" id="gift-note" maxlength="280" placeholder="Say something nice">
+    </div>
+    <p id="gift-msg" class="form-msg"></p>
+    <button class="btn primary" onclick="sendGift('${esc(username)}')">Send gift</button>
+  `);
+}
+
+async function sendGift(username) {
+  const amount = parseInt(document.getElementById('gift-amount').value, 10) || 0;
+  const message = document.getElementById('gift-note').value;
+  const res = await api('/api/shards/gift', { method: 'POST', body: { username, amount, message } });
+  const msg = document.getElementById('gift-msg');
+  if (!res.ok) { msg.textContent = res.data.error || 'Failed'; return; }
+  if (typeof res.data.new_balance === 'number') {
+    currentUser.shards = res.data.new_balance;
+    document.getElementById('shards-count').textContent = res.data.new_balance.toLocaleString();
+  }
+  toast(`Gifted ${amount} 💎 to ${username}`, 'success');
+  closeModal();
+}
+
+// ---------- username change ----------
+function showChangeUsernameModal() {
+  showModal(`
+    <h3>✏️ <span class="accent">Change username</span></h3>
+    <p style="color: var(--text-mute); margin-bottom: 10px;">You get a few changes per hour. Old names stay retired.</p>
+    <div class="field">
+      <label>New username</label>
+      <input type="text" id="nu-name" value="${esc(currentUser.username)}">
+    </div>
+    <div class="field">
+      <label>Confirm password</label>
+      <input type="password" id="nu-pass">
+    </div>
+    <p id="nu-msg" class="form-msg"></p>
+    <button class="btn primary" onclick="doChangeUsername()">Change</button>
+  `);
+}
+
+async function doChangeUsername() {
+  const new_username = document.getElementById('nu-name').value.trim();
+  const password = document.getElementById('nu-pass').value;
+  const res = await api('/api/settings/username', { method: 'POST', body: { new_username, password } });
+  const msg = document.getElementById('nu-msg');
+  if (!res.ok) { msg.textContent = res.data.error || 'Failed'; return; }
+  toast('Username changed', 'success');
+  currentUser.username = res.data.username || new_username;
+  document.getElementById('my-username').textContent = currentUser.username;
+  closeModal();
+}
+
+// ---------- warning modal + Sorry ----------
+async function showWarningModal(data) {
+  const sorry = await api('/api/sorry');
+  const can = sorry.data || {};
+  const body = document.getElementById('modal-content');
+  showModal(`
+    <div class="big-warning">
+      <div class="big-warning-icon">⚠️</div>
+      <h3 class="big-warning-title">Whoa there</h3>
+      <p class="big-warning-body">${esc(data.body || data.error || 'Something triggered the anti-cheat.')}</p>
+      ${can.can_use ? `
+        <button class="btn secondary" onclick="useSorry()">🙏 Sorry — undo this warning (${can.uses_available} left)</button>
+      ` : (can.throttled ? '<p class="dim">You are throttled right now — slow down a little.</p>' : '')}
+      <button class="btn primary" onclick="closeModal()">I understand</button>
+    </div>
+  `);
+}
+
+async function useSorry() {
+  const res = await api('/api/sorry', { method: 'POST' });
+  if (!res.ok) return toast(res.data.error || 'Sorry not available', 'warn');
+  toast(res.data.message || 'Warning undone. This time. 🙏', 'success');
+  closeModal();
+}
+
+// ---------- report / message ----------
+function reportUser(username) {
+  showModal(`
+    <h3>🚩 <span class="accent">Report</span> ${esc(username)}</h3>
+    <div class="field">
+      <label>What happened?</label>
+      <textarea id="rep-details" rows="3" placeholder="Describe the issue"></textarea>
+    </div>
+    <button class="btn danger" onclick="doReport('${esc(username)}')">Send report</button>
+  `);
+}
+
+async function doReport(username) {
+  const details = document.getElementById('rep-details').value;
+  const res = await api('/api/anticheat/report', { method: 'POST', body: { event_type: 'user_report', details: `about ${username}: ${details}` } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  toast('Report received. A person will look at it.', 'success');
+  closeModal();
+}
+
+async function messageUser(username) {
+  const res = await api('/api/conversations/new_dm', { method: 'POST', body: { username } });
+  if (!res.ok) return toast(res.data.error || 'Could not open chat', 'error');
+  closeModal(); closeProfileCard();
+  await loadConversations();
+  const cRes = await api('/api/conversations');
+  const conv = (cRes.data.conversations || []).find(c => c.id === res.data.conversation_id);
+  if (conv) openConversation(conv);
+}
+
+// ---------- features modal ----------
+function showFeaturesModal() {
+  api('/api/features').then(res => {
+    const f = res.data || {};
+    const enc = f.encryption || {};
+    const points = (enc.points || []).map(pt => `<li>${esc(pt)}</li>`).join('');
+    const notes = (f.notes || []).map(nt => `<li>${esc(nt)}</li>`).join('');
+    showModal(`
+      <h3>🔐 <span class="accent">${esc(enc.name || 'Cipher HyperCrypt')}</span></h3>
+      <p class="tos-lead">${esc(enc.tagline || '')}</p>
+      <div class="tos-section"><h4>The encryption, in human words</h4><ul class="features-list">${points}</ul></div>
+      <div class="tos-section"><h4>The vibe</h4><ul class="features-list">${notes}</ul></div>
+      <p class="dim" style="margin-top: 10px;">${esc(f.made_by || '')}</p>
+    `, true, true);
+  });
+}
+
+// ---------- bots ----------
+function showMyBotsModal() {
+  api('/api/bots/my_bots').then(res => {
+    const bots = res.data.bots || [];
+    const rows = bots.map(b => `
+      <div class="friend-row">
+        <div class="avatar" style="background: linear-gradient(135deg, #a78bfa, #6366f1)">🤖</div>
+        <div class="friend-name">${esc(b.name)}</div>
+        <button class="btn-mini ghost" onclick="toggleBot('${b.id}', ${!b.active})">${b.active ? 'Pause' : 'Resume'}</button>
+        <button class="btn-mini danger" onclick="deleteBot('${b.id}')">Delete</button>
+      </div>`).join('');
+    showModal(`
+      <h3>🤖 <span class="accent">Your bots</span></h3>
+      <p style="color: var(--text-mute); margin-bottom: 10px;">Bots post through the API with a hashed token, capped at 60 messages/minute. Max 5.</p>
+      ${rows || '<p class="dim">No bots yet.</p>'}
+      <button class="btn primary" onclick="showCreateBot()">Create a bot</button>
+    `, true, true);
+  });
+}
+
+function showCreateBot() {
+  showModal(`
+    <h3>🤖 <span class="accent">New bot</span></h3>
+    <div class="field"><label>Bot name</label><input type="text" id="bot-name" placeholder="my-cool-bot"></div>
+    <p id="bot-msg" class="form-msg"></p>
+    <button class="btn primary" onclick="createBot()">Create</button>
+  `);
+}
+
+async function createBot() {
+  const name = document.getElementById('bot-name').value.trim();
+  const res = await api('/api/bots/register', { method: 'POST', body: { name } });
+  const msg = document.getElementById('bot-msg');
+  if (!res.ok) { msg.textContent = res.data.error || 'Failed'; return; }
+  showModal(`
+    <h3>🤖 <span class="accent">Bot created</span></h3>
+    <p style="color: var(--text-mute);">Copy this token now — it is shown once:</p>
+    <code class="token-box">${esc(res.data.token)}</code>
+    <button class="btn primary" onclick="showMyBotsModal()">Done</button>
+  `);
+}
+
+async function toggleBot(id, active) {
+  await api(`/api/admin/bots/${id}/toggle`, { method: 'POST', body: { active } }).catch(() => {});
+  // Owners/admins use the admin endpoint; regular users use their own toggle
+  await api(`/api/bots/${id}/deactivate`, { method: 'POST' }).catch(() => {});
+  showMyBotsModal();
+}
+
+async function deleteBot(id) {
+  await api(`/api/bots/${id}`, { method: 'DELETE' });
+  showMyBotsModal();
+}
+
+// ---------- admin v1.2 loaders ----------
+async function loadAdminCores() {
+  const body = document.getElementById('admin-body');
+  body.innerHTML = `
+    <div class="admin-search">
+      <input type="text" id="gc-user" placeholder="username">
+      <input type="number" id="gc-amount" placeholder="amount" style="width:90px">
+      <input type="text" id="gc-reason" placeholder="reason" style="flex:1">
+      <button class="btn-mini" onclick="grantCores()">Grant Cores</button>
+    </div>
+    <div id="gc-log">Loading…</div>
+  `;
+  const res = await api('/api/admin/cores');
+  const rows = (res.data.grants || []).map(g => `
+    <tr><td>${esc(g.username || g.user_id)}</td><td>${g.amount}</td><td>${esc(g.reason || '')}</td><td style="font-size:11px">${new Date(g.created_at).toLocaleString()}</td></tr>`).join('');
+  document.getElementById('gc-log').innerHTML = `
+    <table class="table"><thead><tr><th>User</th><th>Amount</th><th>Reason</th><th>When</th></tr></thead>
+    <tbody>${rows || '<tr class="empty-row"><td colspan="4">No grants yet</td></tr>'}</tbody></table>`;
+}
+
+async function grantCores() {
+  const username = document.getElementById('gc-user').value.trim();
+  const amount = parseInt(document.getElementById('gc-amount').value, 10) || 0;
+  const reason = document.getElementById('gc-reason').value;
+  const res = await api('/api/cores/grant', { method: 'POST', body: { username, amount, reason } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  toast('Cores granted', 'success');
+  loadAdminCores();
+}
+
+async function loadAdminBadges() {
+  const body = document.getElementById('admin-body');
+  body.innerHTML = `
+    <div class="admin-search">
+      <input type="text" id="gb-user" placeholder="username">
+      <input type="text" id="gb-badge" placeholder="badge key">
+      <button class="btn-mini" onclick="grantBadge()">Assign badge</button>
+    </div>
+    <p class="dim" style="font-size:11px">Custom badges you create appear in everyone's catalog.</p>
+    <div id="gb-list">Loading…</div>
+  `;
+  const res = await api('/api/admin/badges');
+  const rows = (res.data.badges || []).map(b => `
+    <tr><td>${esc(b.name)}</td><td>${esc(b.icon || '🏅')}</td><td>${esc(b.description || '')}</td></tr>`).join('');
+  document.getElementById('gb-list').innerHTML = `
+    <table class="table"><thead><tr><th>Name</th><th>Icon</th><th>Description</th></tr></thead>
+    <tbody>${rows || '<tr class="empty-row"><td colspan="3">None yet</td></tr>'}</tbody></table>`;
+}
+
+async function grantBadge() {
+  const username = document.getElementById('gb-user').value.trim();
+  const badge = document.getElementById('gb-badge').value.trim();
+  const res = await api(`/api/admin/badges/${encodeURIComponent(username)}/assign`, { method: 'POST', body: { badge } });
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
+  toast('Badge assigned', 'success');
+  loadAdminBadges();
+}
+
+async function loadAdminBots() {
+  const body = document.getElementById('admin-body');
+  body.innerHTML = '<div id="ab-list">Loading…</div>';
+  const res = await api('/api/admin/bots');
+  const rows = (res.data.bots || []).map(b => `
+    <tr><td>${esc(b.name)}</td><td>${esc(b.owner_username || b.user_id)}</td><td>${b.messages_last_minute || 0}/60</td>
+    <td>${b.active ? 'active' : 'paused'}</td>
+    <td><button class="btn-mini" onclick="adminToggleBot('${b.id}', ${!b.active})">${b.active ? 'Pause' : 'Resume'}</button></td></tr>`).join('');
+  document.getElementById('ab-list').innerHTML = `
+    <table class="table"><thead><tr><th>Bot</th><th>Owner</th><th>Rate</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows || '<tr class="empty-row"><td colspan="5">No bots</td></tr>'}</tbody></table>`;
+}
+
+async function adminToggleBot(id, active) {
+  await api(`/api/admin/bots/${id}/toggle`, { method: 'POST', body: { active } });
+  loadAdminBots();
+}
+
+async function loadAdminAskNicely() {
+  const body = document.getElementById('admin-body');
+  body.innerHTML = '<div id="an-list">Loading…</div>';
+  const res = await api('/api/admin/ask_nicely');
+  const rows = (res.data.requests || []).map(r => `
+    <tr><td>${esc(r.username || r.user_id)}</td><td>${esc(r.message || '')}</td><td>${esc(r.status)}</td>
+    <td>${r.status === 'pending' ? `
+      <button class="btn-mini success" onclick="askDecision('${r.id}', true)">Grant</button>
+      <button class="btn-mini danger" onclick="askDecision('${r.id}', false)">Deny</button>` : ''}</td></tr>`).join('');
+  document.getElementById('an-list').innerHTML = `
+    <table class="table"><thead><tr><th>User</th><th>Asked</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows || '<tr class="empty-row"><td colspan="4">Nothing pending</td></tr>'}</tbody></table>`;
+}
+
+async function askDecision(id, approve) {
+  await api(`/api/admin/ask_nicely/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST' });
+  loadAdminAskNicely();
+}
+
+async function loadAdminApplications() {
+  const body = document.getElementById('admin-body');
+  body.innerHTML = '<div id="aa-list">Loading…</div>';
+  const res = await api('/api/admin/applications');
+  const rows = (res.data.applications || []).map(a => `
+    <tr><td>${esc(a.username || a.user_id)}</td><td>${esc(a.reason || '')}</td><td>${esc(a.status)}</td>
+    <td>${a.status === 'pending' ? `
+      <button class="btn-mini success" onclick="appDecision('${a.id}', true)">Approve</button>
+      <button class="btn-mini danger" onclick="appDecision('${a.id}', false)">Reject</button>` : ''}</td></tr>`).join('');
+  document.getElementById('aa-list').innerHTML = `
+    <table class="table"><thead><tr><th>User</th><th>Why</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows || '<tr class="empty-row"><td colspan="4">No applications</td></tr>'}</tbody></table>`;
+}
+
+async function appDecision(id, approve) {
+  await api(`/api/admin/applications/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST' });
+  loadAdminApplications();
+}
+
+async function loadAdminPurchased() {
+  const body = document.getElementById('admin-body');
+  body.innerHTML = '<div id="ap-list">Loading…</div>';
+  const res = await api('/api/admin/purchased_admins');
+  const rows = (res.data.admins || []).map(a => `
+    <tr><td>${esc(a.username || a.user_id)}</td><td>${esc(a.item_key || '')}</td>
+    <td><button class="btn-mini danger" onclick="revokePurchasedAdmin('${a.user_id}')">Revoke</button></td></tr>`).join('');
+  document.getElementById('ap-list').innerHTML = `
+    <table class="table"><thead><tr><th>User</th><th>Via</th><th></th></tr></thead>
+    <tbody>${rows || '<tr class="empty-row"><td colspan="3">No purchased admins</td></tr>'}</tbody></table>`;
+}
+
+async function revokePurchasedAdmin(uid) {
+  await api(`/api/admin/revoke_admin/${uid}`, { method: 'POST' });
+  loadAdminPurchased();
+}
+
+// ---------- sidebar button wiring ----------
+document.getElementById('notifications-btn').addEventListener('click', showNotificationsModal);
+document.getElementById('friends-btn').addEventListener('click', showFriendsModal);
+document.getElementById('features-btn').addEventListener('click', showFeaturesModal);
 
 // ==========  BOOTSTRAP  ==========
 initAuthTabs();
