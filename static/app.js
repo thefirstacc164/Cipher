@@ -294,6 +294,14 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
   currentUser = res.data.user;
   pendingUnlockPassword = body.password;
 
+  // The auth routes return the full /api/me payload now, but if a slim one
+  // ever comes back (old cache, rollback), fetch the real thing so the app
+  // never paints with shards/cores stuck at 0 until a manual reload.
+  if (!currentUser || currentUser.shards === undefined) {
+    const meRes = await api('/api/me');
+    if (meRes.ok && meRes.data.user) currentUser = meRes.data.user;
+  }
+
   if (isSignup && res.data.recovery_phrase) {
     showRecoveryModal(res.data.recovery_phrase, res.data.recovery_key);
   } else {
@@ -542,6 +550,29 @@ async function checkSession() {
   loadAnnouncements();
 }
 
+// ==========  BALANCES — LIVE REFRESH  ==========
+let balanceTimer = null;
+
+async function refreshBalances() {
+  const res = await api('/api/me');
+  if (!res.ok || !res.data.user) return;
+  currentUser = res.data.user;
+  const shardsEl = document.getElementById('shards-count');
+  const coresEl = document.getElementById('cores-count');
+  if (shardsEl) shardsEl.textContent = (currentUser.shards || 0).toLocaleString();
+  if (coresEl) coresEl.textContent = (currentUser.cores || 0).toLocaleString();
+}
+
+function startBalancePolling() {
+  if (balanceTimer) clearInterval(balanceTimer);
+  balanceTimer = setInterval(() => {
+    if (!document.hidden) refreshBalances();   // hidden tabs: one catch-up on focus
+  }, 10000);
+}
+
+// Fresh numbers the moment the tab comes back, no waiting on the timer.
+window.addEventListener('focus', () => { if (currentUser) refreshBalances(); });
+
 function enterApp() {
   document.getElementById('auth-screen').classList.add('hidden');
   document.getElementById('app-screen').classList.remove('hidden');
@@ -551,9 +582,11 @@ function enterApp() {
   // BUG 4: the me-card avatar goes through the one shared renderer
   paintAvatar(document.getElementById('me-avatar'), currentUser, 'lg');
 
-  // Balances (Shards + Cores)
+  // Balances (Shards + Cores) — painted now, then kept fresh every 10s
   document.getElementById('shards-count').textContent = (currentUser.shards || 0).toLocaleString();
   document.getElementById('cores-count').textContent = (currentUser.cores || 0).toLocaleString();
+  refreshBalances();
+  startBalancePolling();
 
   updateTheme(currentUser.theme_color || '#00d9ff');
 
@@ -577,6 +610,7 @@ function enterApp() {
   msgs.addEventListener('drop', handleDrop);
   document.addEventListener('visibilitychange', () => {
     if (currentConv) restartPollingWithNewInterval();
+    if (!document.hidden) refreshBalances();
   });
 }
 
@@ -1778,19 +1812,26 @@ async function showShopModal() {
 }
 
 function renderShopModal() {
-  const categories = [
-    { key: 'profile', label: 'Profile' },
-    { key: 'avatar_effects', label: 'Effects' },
-    { key: 'chat', label: 'Chat' },
-    { key: 'badges', label: 'Badges' },
-    { key: 'perks', label: 'Perks' }
-  ];
+  const isCores = shopCurrency === 'cores';
+  // Every Cores item lives in the 'cores_shop' category; the Shards side has
+  // its own five tabs. Showing shard tabs while filtering on cores currency
+  // (or vice versa) is exactly how the shop ended up looking empty.
+  const categories = isCores
+    ? [{ key: 'cores_shop', label: 'Cores Shop' }]
+    : [
+        { key: 'profile', label: 'Profile' },
+        { key: 'avatar_effects', label: 'Effects' },
+        { key: 'chat', label: 'Chat' },
+        { key: 'badges', label: 'Badges' },
+        { key: 'perks', label: 'Perks' }
+      ];
   const catButtons = categories.map(c =>
     `<button class="shop-cat ${c.key === currentShopCategory ? 'active' : ''}" onclick="switchShopCat('${c.key}')">${c.label}</button>`
   ).join('');
 
-  const items = shopItemsCache.filter(i => i.category === currentShopCategory
-    && (i.currency || 'shards') === shopCurrency);
+  const items = shopItemsCache.filter(i => isCores
+    ? (i.currency || 'shards') === 'cores'
+    : (i.category === currentShopCategory && (i.currency || 'shards') !== 'cores'));
   const cards = items.map(item => renderShopItem(item)).join('');
 
   showModal(`
@@ -1814,6 +1855,9 @@ function switchShopCat(cat) {
 
 function switchShopCurrency(cur) {
   shopCurrency = cur;
+  // Keep the category on the correct side of the shop when flipping currency.
+  if (cur === 'cores') currentShopCategory = 'cores_shop';
+  else if (currentShopCategory === 'cores_shop') currentShopCategory = 'profile';
   renderShopModal();
 }
 
@@ -2624,7 +2668,9 @@ async function loadAdminAffiliates() {
   const body = document.getElementById('admin-body');
   const res = await api('/api/admin/affiliate/pending');
   if (!res.ok) {
-    body.innerHTML = '<p>You do not have permission to view this.</p>';
+    // Show the real backend error (schema drift used to look like a
+    // permissions problem to the owner).
+    body.innerHTML = `<p>${esc(res.data.error || 'You do not have permission to view this.')}</p>`;
     return;
   }
   const pending = res.data.pending || [];
@@ -2650,7 +2696,7 @@ async function loadAdminAffiliates() {
 
 async function approveAff(id) {
   const res = await api(`/api/admin/affiliate/${id}/approve`, { method: 'POST' });
-  if (!res.ok) return toast(res.data.error, 'error');
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
   toast('Approved', 'success');
   loadAdminAffiliates();
 }
@@ -2658,7 +2704,7 @@ async function approveAff(id) {
 async function rejectAff(id) {
   const reason = window.prompt('Rejection reason (optional):') || '';
   const res = await api(`/api/admin/affiliate/${id}/reject`, { method: 'POST', body: { reason } });
-  if (!res.ok) return toast(res.data.error, 'error');
+  if (!res.ok) return toast(res.data.error || 'Failed', 'error');
   toast('Rejected', 'success');
   loadAdminAffiliates();
 }
