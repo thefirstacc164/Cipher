@@ -137,22 +137,43 @@ def load_schema_map(force=False):
     """
     if not sb:
         return None
-    if not force and _schema_map["map"] is not None and \
-            (time.time() - _schema_map["at"]) < CACHE_SCHEMA_SECONDS:
+    if not force and (time.time() - _schema_map["at"]) < CACHE_SCHEMA_SECONDS \
+            and (_schema_map["map"] is not None or _schema_map["tried"]):
         return _schema_map["map"]
     mapping = None
+    _schema_map["tried"] = True
     try:
-        res = sb.postgrest.get("/", headers={"Accept": "application/openapi+json"})
+        # supabase 2.7.4's postgrest client has no `.get`; its HTTP session
+        # does. Try the shapes different versions expose, in order.
+        res = None
+        for holder in (sb, getattr(sb, "supabase", None), getattr(sb, "_client", None)):
+            if res is not None:
+                break
+            for attr in ("postgrest", "_postgrest", "rest"):
+                client = getattr(holder, attr, None)
+                for candidate in (getattr(client, "session", None), client):
+                    if candidate is not None and hasattr(candidate, "get"):
+                        res = candidate.get("/", headers={"Accept": "application/openapi+json"})
+                        break
+                if res is not None:
+                    break
+        if res is None:
+            raise RuntimeError("no rest client available")
         spec = res.json() if hasattr(res, "json") else json.loads(getattr(res, "text", "{}"))
         defs = spec.get("definitions") or (spec.get("components") or {}).get("schemas") or {}
         mapping = {name: set(props.keys()) for name, props in defs.items()
                    if isinstance(props, dict)}
     except Exception as e:
-        print(f"[schema probe] {e}")
+        # Fail quietly after one note: table_columns() falls back to per-table
+        # limit(1) probes, so a dead probe only costs one extra query per table.
+        if not _schema_map.get("warned"):
+            _schema_map["warned"] = True
+            print(f"[schema probe] unavailable, falling back to per-table probes ({e})")
         mapping = None
-    if mapping:
-        _schema_map["at"] = time.time()
-        _schema_map["map"] = mapping
+    # Cache failures too — retry at most once per CACHE_SCHEMA_SECONDS instead
+    # of on every request (that's what spammed the log to death).
+    _schema_map["at"] = time.time()
+    _schema_map["map"] = mapping
     return mapping
 
 
@@ -337,6 +358,25 @@ def now_iso():
 
 def hash_content(content):
     return hashlib.md5((content or "").encode()).hexdigest()[:16]
+
+
+def _bcrypt_hash(secret):
+    """
+    Hash a secret the way bcrypt has always behaved: first 72 bytes only.
+
+    bcrypt 4.x silently truncated longer input; bcrypt 5.x raises
+    ("password cannot be longer than 72 bytes"), which killed signup the
+    moment a 96-char recovery key hit it. Truncating here keeps every hash
+    ever made by 4.x verifiable and makes 5.x safe to upgrade to.
+    """
+    return bcrypt.hashpw(secret.encode("utf-8")[:72], bcrypt.gensalt()).decode()
+
+
+def _bcrypt_check(secret, hashed):
+    try:
+        return bcrypt.checkpw(secret.encode("utf-8")[:72], (hashed or "").encode())
+    except Exception:
+        return False
 
 
 def is_immune(user):
@@ -1100,7 +1140,7 @@ def signup():
             if not aff_res:
                 return jsonify({"error": "Invalid affiliate code"}), 400
             affiliate = aff_res[0]
-            if affiliate.get("revoked"):
+            if affiliate.get("revoked") or affiliate.get("active") is False:
                 return jsonify({"error": "This affiliate code has been revoked"}), 400
             if not affiliate.get("approved"):
                 return jsonify({"error": "This affiliate code is not active yet"}), 400
@@ -1109,14 +1149,14 @@ def signup():
         if exists:
             return jsonify({"error": "Username already taken"}), 400
 
-        pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        pw_hash = _bcrypt_hash(password)
         user_count = sb.table("users").select("id", count="exact").execute().count or 0
         is_owner = (user_count == 0)
 
         phrase = generate_recovery_phrase()
-        phrase_hash = bcrypt.hashpw(phrase.encode(), bcrypt.gensalt()).decode()
+        phrase_hash = _bcrypt_hash(phrase)
         recovery_key = secrets.token_hex(48)
-        key_hash = bcrypt.hashpw(recovery_key.encode(), bcrypt.gensalt()).decode()
+        key_hash = _bcrypt_hash(recovery_key)
 
         signup_ip = get_ip()
 
@@ -1171,14 +1211,17 @@ def signup():
 
         # Handle invite
         if invite:
-            sb.table("invite_links").update({
-                "uses_count": invite.get("uses_count", 0) + 1
-            }).eq("id", invite["id"]).execute()
-            sb.table("invite_uses").insert({
-                "invite_id": invite["id"],
-                "user_id": new_user["id"],
-                "ip_address": signup_ip
-            }).execute()
+            try:
+                safe_update("invite_links", {
+                    "uses_count": (invite.get("uses_count", 0) or 0) + 1
+                }, ("id", invite["id"]))
+                safe_insert("invite_uses", {
+                    "invite_id": invite["id"],
+                    "user_id": new_user["id"],
+                    "ip_address": signup_ip
+                })
+            except Exception as e:
+                print(f"[signup invite] {e}")
 
         # Handle affiliate — award shards to referrer
         if affiliate:
@@ -1192,20 +1235,23 @@ def signup():
                     pass  # same IP, likely self-refer attempt, skip
                 else:
                     shards_amount = settings.get("shards_per_referral", 10) or 10
-                    # Record affiliate use
+                    # Record affiliate use. The live table predates the v1.2
+                    # naming (`referred_user_id`) and still has `new_user_id`;
+                    # safe_insert drops whichever key the table lacks.
                     try:
-                        sb.table("affiliate_uses").insert({
+                        safe_insert("affiliate_uses", {
                             "code_id": affiliate["id"],
                             "referrer_id": affiliate["user_id"],
                             "referred_user_id": new_user["id"],
+                            "new_user_id": new_user["id"],
                             "shards_awarded": shards_amount,
                             "signup_ip": signup_ip
-                        }).execute()
-                        # Update affiliate stats
-                        sb.table("affiliate_codes").update({
+                        })
+                        # Update affiliate stats (total_earned is post-patch2)
+                        safe_update("affiliate_codes", {
                             "uses": (affiliate.get("uses", 0) or 0) + 1,
                             "total_earned": (affiliate.get("total_earned", 0) or 0) + shards_amount
-                        }).eq("id", affiliate["id"]).execute()
+                        }, ("id", affiliate["id"]))
                         # Award shards
                         award_shards(
                             affiliate["user_id"],
@@ -1221,14 +1267,12 @@ def signup():
         session.permanent = True
         session["user_id"] = new_user["id"]
 
+        # Full /api/me-shaped payload + a primed cache (see login()).
+        _cache_set(_user_cache, new_user["id"], new_user)
         return jsonify({
             "ok": True,
-            "user": {
-                "id": new_user["id"],
-                "username": username,
-                "is_owner": is_owner,
-                "is_admin": is_owner
-            },
+            "user": build_full_user_payload(new_user),
+            "poll_config": POLL_CONFIG,
             "recovery_phrase": phrase,
             "recovery_key": recovery_key
         })
@@ -1284,7 +1328,7 @@ def login():
             except Exception:
                 pass
 
-        if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        if not _bcrypt_check(password, user["password_hash"]):
             return jsonify({"error": "Invalid username or password"}), 400
 
         # 2FA challenge
@@ -1307,14 +1351,13 @@ def login():
         session.permanent = True
         session["user_id"] = user["id"]
 
+        # Full /api/me-shaped payload + a primed cache: the app boots with the
+        # real shards/cores/privileges instead of zeros until a reload.
+        _cache_set(_user_cache, user["id"], user)
         return jsonify({
             "ok": True,
-            "user": {
-                "id": user["id"],
-                "username": user["username"],
-                "is_owner": user.get("is_owner", False),
-                "is_admin": user.get("is_admin", False)
-            }
+            "user": build_full_user_payload(user),
+            "poll_config": POLL_CONFIG
         })
     except Exception as e:
         print(f"[login] {e}")
@@ -1359,26 +1402,21 @@ def _master_key_public():
         return None
 
 
-@app.route("/api/me")
-def me():
-    u = current_user()
-    if not u:
-        return jsonify({"user": None, "poll_config": POLL_CONFIG})
+def build_full_user_payload(u):
+    """
+    The complete 'user' object the frontend consumes — the exact shape
+    /api/me returns.
 
-    # Get profile data
+    /api/login and /api/signup used to hand back only
+    {id, username, is_owner, is_admin}, so the app painted with shards=0,
+    cores=0 and no privileges until a hard reload finally hit /api/me.
+    Every auth surface now returns this payload instead.
+    """
     profile = {}
     try:
         prof_res = sb.table("user_profiles").select("*").eq("user_id", u["id"]).execute().data
         if prof_res:
             profile = prof_res[0]
-    except Exception:
-        pass
-
-    # Longevity bonuses are checked here (throttled to once a day per user)
-    # so they arrive without needing a cron worker on the free tier.
-    try:
-        check_longevity_bonuses(u["id"])
-        u = get_user_row(u["id"]) or u
     except Exception:
         pass
 
@@ -1393,50 +1431,67 @@ def me():
                         "can_manage_shop_items", "can_manage_admins"]:
                 permissions[key] = True
 
+    return {
+        "id": u["id"],
+        "username": u["username"],
+        "is_owner": u.get("is_owner", False),
+        "is_admin": u.get("is_admin", False),
+        "is_bot": u.get("is_bot", False),
+        "is_immune": is_immune(u),
+        "keep_all_forever": u.get("keep_all_forever", False),
+        "notify_before_delete": u.get("notify_before_delete", True),
+        "nickname_color": u.get("nickname_color") or "#00d9ff",
+        "theme_color": u.get("theme_color") or "#00d9ff",
+        "anonymous_mode": u.get("anonymous_mode", False),
+        "totp_enabled": u.get("totp_enabled", False),
+        "shards": u.get("shards", 0) or 0,
+        "cores": u.get("cores", 0) or 0,
+        "leaderboard_opt_out": u.get("leaderboard_opt_out", False),
+        "bubble_color": u.get("bubble_color"),
+        "name_font": u.get("name_font"),
+        "msg_animation": u.get("msg_animation"),
+        "created_at": u.get("created_at"),
+        "total_messages_sent": u.get("total_messages_sent", 0) or 0,
+        "can_grant_cores": bool(u.get("can_grant_cores")),
+        # v1.2 social + safety
+        "friend_privacy": u.get("friend_privacy") or "approval",
+        "streamer_mode": merge_streamer(u.get("streamer_mode"), get_settings().get("global_streamer_forces")),
+        "tos_bonus_claimed": bool(u.get("tos_bonus_claimed")),
+        "spam_warnings": u.get("spam_warnings", 0) or 0,
+        "sorry_uses_this_week": _sorry_uses_left(u)["used"],
+        "sorry_uses_available": _sorry_uses_left(u)["available"],
+        # Profile data
+        "bio": profile.get("bio", ""),
+        "avatar_url": profile.get("avatar_url"),
+        "banner_color": profile.get("banner_color"),
+        "active_effects": profile.get("active_effects", []) or [],
+        "active_badges": all_badges(profile.get("active_badges"), compute_system_badges(u)),
+        "active_bubble_color": profile.get("active_bubble_color"),
+        "active_nickname_font": profile.get("active_nickname_font"),
+        "active_message_animation": profile.get("active_message_animation"),
+        # Permissions
+        "permissions": permissions,
+        # Dynamic credits joke color name
+        "theme_color_name": get_color_name(u.get("theme_color") or "#00d9ff")
+    }
+
+
+@app.route("/api/me")
+def me():
+    u = current_user()
+    if not u:
+        return jsonify({"user": None, "poll_config": POLL_CONFIG})
+
+    # Longevity bonuses are checked here (throttled to once a day per user)
+    # so they arrive without needing a cron worker on the free tier.
+    try:
+        check_longevity_bonuses(u["id"])
+        u = get_user_row(u["id"]) or u
+    except Exception:
+        pass
+
     return jsonify({
-        "user": {
-            "id": u["id"],
-            "username": u["username"],
-            "is_owner": u.get("is_owner", False),
-            "is_admin": u.get("is_admin", False),
-            "is_bot": u.get("is_bot", False),
-            "is_immune": is_immune(u),
-            "keep_all_forever": u.get("keep_all_forever", False),
-            "notify_before_delete": u.get("notify_before_delete", True),
-            "nickname_color": u.get("nickname_color") or "#00d9ff",
-            "theme_color": u.get("theme_color") or "#00d9ff",
-            "anonymous_mode": u.get("anonymous_mode", False),
-            "totp_enabled": u.get("totp_enabled", False),
-            "shards": u.get("shards", 0) or 0,
-            "cores": u.get("cores", 0) or 0,
-            "leaderboard_opt_out": u.get("leaderboard_opt_out", False),
-            "bubble_color": u.get("bubble_color"),
-            "name_font": u.get("name_font"),
-            "msg_animation": u.get("msg_animation"),
-            "created_at": u.get("created_at"),
-            "total_messages_sent": u.get("total_messages_sent", 0) or 0,
-            "can_grant_cores": bool(u.get("can_grant_cores")),
-            # v1.2 social + safety
-            "friend_privacy": u.get("friend_privacy") or "approval",
-            "streamer_mode": merge_streamer(u.get("streamer_mode"), get_settings().get("global_streamer_forces")),
-            "tos_bonus_claimed": bool(u.get("tos_bonus_claimed")),
-            "spam_warnings": u.get("spam_warnings", 0) or 0,
-            "sorry_uses_this_week": _sorry_uses_left(u)["used"],
-            "sorry_uses_available": _sorry_uses_left(u)["available"],
-            # Profile data
-            "bio": profile.get("bio", ""),
-            "avatar_url": profile.get("avatar_url"),
-            "banner_color": profile.get("banner_color"),
-            "active_effects": profile.get("active_effects", []) or [],
-            "active_badges": all_badges(profile.get("active_badges"), compute_system_badges(u)),
-            "active_bubble_color": profile.get("active_bubble_color"),
-            "active_nickname_font": profile.get("active_nickname_font"),
-            "active_message_animation": profile.get("active_message_animation"),
-            # Permissions
-            "permissions": permissions,
-            # Dynamic credits joke color name
-            "theme_color_name": get_color_name(u.get("theme_color") or "#00d9ff")
-        },
+        "user": build_full_user_payload(u),
         "poll_config": POLL_CONFIG,
         "server_time": now_iso(),
         "encryption": {
@@ -1472,10 +1527,10 @@ def recover_phrase():
         if not user.get("recovery_phrase"):
             return jsonify({"error": "No recovery phrase was set for this account"}), 400
 
-        if not bcrypt.checkpw(phrase.encode(), user["recovery_phrase"].encode()):
+        if not _bcrypt_check(phrase, user["recovery_phrase"]):
             return jsonify({"error": "Incorrect recovery phrase"}), 400
 
-        new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+        new_hash = _bcrypt_hash(new_password)
         sb.table("users").update({"password_hash": new_hash}).eq("id", user["id"]).execute()
         return jsonify({"ok": True})
     except Exception as e:
@@ -1506,8 +1561,8 @@ def recover_key():
 
         for k in keys:
             try:
-                if bcrypt.checkpw(key.encode(), k["key_hash"].encode()):
-                    new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+                if _bcrypt_check(key, k["key_hash"]):
+                    new_hash = _bcrypt_hash(new_password)
                     sb.table("users").update({"password_hash": new_hash}).eq("id", uid).execute()
                     return jsonify({"ok": True})
             except Exception:
@@ -1570,10 +1625,10 @@ def change_password():
         if not u:
             return jsonify({"error": "Session expired"}), 401
 
-        if not bcrypt.checkpw(old.encode(), u["password_hash"].encode()):
+        if not _bcrypt_check(old, u["password_hash"]):
             return jsonify({"error": "Current password is incorrect"}), 400
 
-        new_hash = bcrypt.hashpw(new.encode(), bcrypt.gensalt()).decode()
+        new_hash = _bcrypt_hash(new)
         sb.table("users").update({"password_hash": new_hash}).eq("id", u["id"]).execute()
         return jsonify({"ok": True})
     except Exception as e:
@@ -1684,7 +1739,7 @@ def disable_2fa():
         data = request.json or {}
         password = data.get("password") or ""
         u = current_user()
-        if not bcrypt.checkpw(password.encode(), u["password_hash"].encode()):
+        if not _bcrypt_check(password, u["password_hash"]):
             return jsonify({"error": "Password incorrect"}), 400
         sb.table("users").update({
             "totp_secret": None,
@@ -2876,7 +2931,7 @@ def admin_reset_password(uid):
         if target and is_immune(target[0]) and not me.get("is_owner"):
             return jsonify({"error": "This user is immune"}), 403
         new_pass = secrets.token_urlsafe(10)
-        new_hash = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt()).decode()
+        new_hash = _bcrypt_hash(new_pass)
         sb.table("users").update({"password_hash": new_hash}).eq("id", uid).execute()
         audit("reset_password", "user", uid)
         return jsonify({"ok": True, "new_password": new_pass})
@@ -3760,12 +3815,18 @@ def create_affiliate_code():
         else:
             approved = True
 
-        sb.table("affiliate_codes").insert({
+        row = safe_insert("affiliate_codes", {
             "user_id": uid,
             "code": code,
             "approved": approved,
+            "pending": not approved,
+            "active": True,
+            "uses": 0,
             "reason": reason if not approved else None
-        }).execute()
+        })
+        if not row:
+            return jsonify({"error": "Could not create the code — if this keeps happening, "
+                                     "run migration_v1.2_patch2.sql on the database"}), 500
 
         return jsonify({"ok": True, "approved": approved})
     except Exception as e:
@@ -3783,10 +3844,13 @@ def revoke_affiliate_code(code_id):
         u = current_user()
         if code[0]["user_id"] != uid and not (u.get("is_owner") or has_permission(u, "can_approve_affiliates")):
             return jsonify({"error": "Not your code"}), 403
-        sb.table("affiliate_codes").update({
+        # `revoked`/`revoked_at` only exist after patch2; `active`/`approved`
+        # are v1.1 columns, so revoking works either way.
+        safe_update("affiliate_codes", {
             "revoked": True,
-            "revoked_at": now_iso()
-        }).eq("id", code_id).execute()
+            "revoked_at": now_iso(),
+            "active": False
+        }, ("id", code_id))
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3796,7 +3860,18 @@ def revoke_affiliate_code(code_id):
 @permission_required("can_approve_affiliates")
 def list_pending_affiliates():
     try:
-        pending = sb.table("affiliate_codes").select("*,users(username)").eq("approved", False).eq("revoked", False).order("created_at", desc=True).execute().data
+        try:
+            pending = sb.table("affiliate_codes").select("*,users(username)") \
+                .eq("approved", False).eq("revoked", False) \
+                .order("created_at", desc=True).execute().data
+        except Exception:
+            # Pre-patch2 database: no `revoked` column (PostgREST 42703) —
+            # fetch without the filter and screen in Python instead.
+            pending = sb.table("affiliate_codes").select("*,users(username)") \
+                .eq("approved", False) \
+                .order("created_at", desc=True).execute().data
+        pending = [p for p in (pending or [])
+                   if not p.get("revoked") and not p.get("rejected_at")]
         return jsonify({"pending": pending})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3806,11 +3881,13 @@ def list_pending_affiliates():
 @permission_required("can_approve_affiliates")
 def approve_affiliate(code_id):
     try:
-        sb.table("affiliate_codes").update({
+        safe_update("affiliate_codes", {
             "approved": True,
+            "pending": False,
+            "active": True,
             "approved_by": session["user_id"],
             "approved_at": now_iso()
-        }).eq("id", code_id).execute()
+        }, ("id", code_id))
         audit("approve_affiliate", "affiliate_code", code_id)
         return jsonify({"ok": True})
     except Exception as e:
@@ -3822,11 +3899,16 @@ def approve_affiliate(code_id):
 def reject_affiliate(code_id):
     try:
         reason = ((request.json or {}).get("reason") or "").strip()
-        sb.table("affiliate_codes").update({
+        # The rejected_* columns land with patch2; approved/pending/active are
+        # v1.1 columns so a rejection sticks before the migration runs too.
+        safe_update("affiliate_codes", {
+            "approved": False,
+            "pending": False,
+            "active": False,
             "rejected_by": session["user_id"],
             "rejected_at": now_iso(),
             "rejection_reason": reason
-        }).eq("id", code_id).execute()
+        }, ("id", code_id))
         audit("reject_affiliate", "affiliate_code", code_id, reason)
         return jsonify({"ok": True})
     except Exception as e:
@@ -4103,7 +4185,13 @@ def check_longevity_bonuses(user_id, force=False):
     background job; the last_no_warning_check column keeps it to once a day.
     """
     try:
-        rows = sb.table("users").select("id,last_warning_at,created_at,last_no_warning_check").eq("id", user_id).execute().data
+        try:
+            rows = sb.table("users").select("id,last_warning_at,created_at,last_no_warning_check").eq("id", user_id).execute().data
+        except Exception:
+            # Pre-patch2 database has no last_no_warning_check (42703).
+            # Fall back to the columns that do exist and skip the throttle —
+            # claim_milestone() is idempotent, so re-checking is harmless.
+            rows = sb.table("users").select("id,last_warning_at,created_at").eq("id", user_id).execute().data
         if not rows:
             return []
         u = rows[0]
@@ -5130,7 +5218,7 @@ def register_bot():
         token = secrets.token_hex(32)     # 64 hex chars
         row = safe_insert("users", {
             "username": username,
-            "password_hash": bcrypt.hashpw(secrets.token_hex(24).encode(), bcrypt.gensalt()).decode(),
+            "password_hash": _bcrypt_hash(secrets.token_hex(24)),
             "is_bot": True,
             "bot_token_hash": hash_token(token),
             "bot_owner_id": uid,
@@ -6428,8 +6516,14 @@ def cleanup_task():
         try:
             # Longevity bonuses for anyone who has not loaded the app recently.
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
-            due = sb.table("users").select("id,last_no_warning_check").eq("is_bot", False) \
-                .limit(500).execute().data
+            try:
+                due = sb.table("users").select("id,last_no_warning_check").eq("is_bot", False) \
+                    .limit(500).execute().data
+            except Exception:
+                # Pre-patch2 database has no last_no_warning_check — check
+                # everyone (milestones are idempotent) instead of erroring.
+                due = sb.table("users").select("id").eq("is_bot", False) \
+                    .limit(500).execute().data
             checked = 0
             for row in due or []:
                 last = row.get("last_no_warning_check")
@@ -6447,7 +6541,11 @@ def cleanup_task():
 
 
 scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(cleanup_task, "interval", minutes=15, next_run_time=datetime.now())
+# First run waits 90s: the deploy's port scan and the first real requests
+# need the free-tier box to themselves. (An immediate run made the boot logs
+# a wall of queries exactly while Render was deciding the service was up.)
+scheduler.add_job(cleanup_task, "interval", minutes=15,
+                  next_run_time=datetime.now() + timedelta(seconds=90))
 scheduler.start()
 
 
