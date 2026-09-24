@@ -1,10 +1,22 @@
 """
 Gunicorn tuning for the free Render tier (512 MB, shared CPU).
 
-Render's default start command is `gunicorn app:app`. Point it at this file
-instead and the app gets sized for the box it actually runs on:
+Render's start command points at this file:
 
     gunicorn -c gunicorn.conf.py app:app
+
+PORT BINDING — why we listen on three ports at once
+---------------------------------------------------
+Render's network configuration remembers whichever port this service
+answered on historically: v1.1 ran `gunicorn app:app`, which binds
+gunicorn's own default 127.0.0.1:8000 (and the even earlier `python app.py`
+era bound 5000). v1.2 bound only 10000 — Render saw that as a brand-new
+primary port on every deploy, restarted the deploy "to update network
+configuration", and SIGTERMed the fresh worker seconds after its health
+check passed, over and over ("No open HTTP ports detected ... Port scan
+timeout"). Binding 5000 + 8000 + 10000 (+ whatever $PORT says) means the
+port Render probes is always answered on the first scan: no detection, no
+restart loop, no dead deploys.
 
 Why one worker and threads instead of more workers: every worker is a full
 copy of the Python process, and the in-process caches in app.py (user rows,
@@ -15,8 +27,14 @@ once per worker.
 """
 
 import multiprocessing
+import os
 
-bind = "0.0.0.0:" + str(__import__("os").getenv("PORT", "10000"))
+_bind = []
+for _p in (os.getenv("PORT", "10000"), "10000", "8000", "5000"):
+    _entry = "0.0.0.0:" + str(_p)
+    if _entry not in _bind:
+        _bind.append(_entry)
+bind = _bind
 workers = 1
 threads = 8
 worker_class = "gthread"
@@ -39,6 +57,6 @@ access_log_format = '%(h)s %(m)s %(U)s %(s)s %(L)ss %(b)sB'
 
 def when_ready(server):
     server.log.info(
-        "Cipher v1.2.0 up: workers=%s threads=%s cpus=%s",
-        workers, threads, multiprocessing.cpu_count(),
+        "Cipher v1.2.0 up: workers=%s threads=%s cpus=%s ports=%s",
+        workers, threads, multiprocessing.cpu_count(), "+".join(_bind),
     )
