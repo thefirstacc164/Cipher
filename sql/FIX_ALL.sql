@@ -50,24 +50,11 @@ DO $$
 DECLARE r record;
 BEGIN
   FOR r IN SELECT * FROM (VALUES
-  ('admin_applications','availability','TEXT'),
-  ('admin_applications','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('admin_applications','id','UUID DEFAULT gen_random_uuid()'), ('admin_applications','reason','TEXT'),
-  ('admin_applications','rejection_reason','TEXT'), ('admin_applications','reviewed_at','TIMESTAMPTZ'),
-  ('admin_applications','reviewed_by','UUID'),
-  ('admin_applications','status','TEXT NOT NULL DEFAULT ''pending'''),
-  ('admin_applications','user_id','UUID'), ('admin_applications','what_would_you_do','TEXT'),
-  ('admin_permissions','can_approve_affiliates','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('admin_permissions','can_ban_ips','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('admin_permissions','can_create_announcements','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('admin_permissions','can_manage_admins','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('admin_permissions','can_manage_shop_items','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('admin_permissions','can_reset_passwords','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('admin_permissions','can_suspend_ban_users','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('admin_permissions','can_view_messages','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('admin_permissions','granted_by','UUID'),
   ('admin_permissions','updated_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('admin_permissions','user_id','UUID'),
   ('admin_settings','admin_ask_grant_amounts','TEXT NOT NULL DEFAULT ''20,50,100'''),
   ('admin_settings','admin_core_grant_max','INTEGER NOT NULL DEFAULT 3'),
   ('admin_settings','admins_can_approve_asks','BOOLEAN NOT NULL DEFAULT FALSE'),
@@ -91,191 +78,27 @@ BEGIN
   ('admin_settings','signups_enabled','BOOLEAN NOT NULL DEFAULT TRUE'),
   ('admin_settings','site_name','TEXT NOT NULL DEFAULT ''Cipher'''),
   ('admin_settings','sorry_button_enabled','BOOLEAN NOT NULL DEFAULT TRUE'),
-  ('affiliate_codes','active','BOOLEAN DEFAULT TRUE'),
-  ('affiliate_codes','approved','BOOLEAN DEFAULT FALSE'), ('affiliate_codes','approved_at','TIMESTAMPTZ'),
-  ('affiliate_codes','approved_by','UUID'), ('affiliate_codes','code','TEXT'),
-  ('affiliate_codes','created_at','TIMESTAMPTZ DEFAULT NOW()'),
-  ('affiliate_codes','id','UUID DEFAULT gen_random_uuid()'),
-  ('affiliate_codes','pending','BOOLEAN DEFAULT FALSE'), ('affiliate_codes','reason','TEXT'),
-  ('affiliate_codes','rejected_at','TIMESTAMPTZ'), ('affiliate_codes','rejected_by','UUID'),
-  ('affiliate_codes','rejection_reason','TEXT'),
   ('affiliate_codes','revoked','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('affiliate_codes','revoked_at','TIMESTAMPTZ'),
-  ('affiliate_codes','total_earned','INTEGER NOT NULL DEFAULT 0'), ('affiliate_codes','user_id','UUID'),
-  ('affiliate_codes','uses','INTEGER DEFAULT 0'), ('affiliate_uses','code_id','UUID'),
-  ('affiliate_uses','created_at','TIMESTAMPTZ DEFAULT NOW()'),
-  ('affiliate_uses','id','UUID DEFAULT gen_random_uuid()'), ('affiliate_uses','new_user_id','UUID'),
-  ('affiliate_uses','referred_user_id','UUID'), ('affiliate_uses','referrer_id','UUID'),
-  ('affiliate_uses','shards_awarded','INTEGER NOT NULL DEFAULT 0'), ('affiliate_uses','signup_ip','TEXT'),
-  ('announcements','active','BOOLEAN NOT NULL DEFAULT TRUE'), ('announcements','content','TEXT'),
-  ('announcements','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('announcements','created_by','UUID'),
-  ('announcements','id','UUID DEFAULT gen_random_uuid()'),
-  ('announcements','priority','TEXT DEFAULT ''normal'''), ('announcements','title','TEXT'),
-  ('anticheat_events','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('anticheat_events','details','TEXT'), ('anticheat_events','event_type','TEXT'),
-  ('anticheat_events','id','UUID DEFAULT gen_random_uuid()'), ('anticheat_events','ip_address','TEXT'),
-  ('anticheat_events','user_id','UUID'),
-  ('ask_nicely_requests','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('ask_nicely_requests','id','UUID DEFAULT gen_random_uuid()'), ('ask_nicely_requests','ip_address','TEXT'),
-  ('ask_nicely_requests','message','TEXT'), ('ask_nicely_requests','reply_message','TEXT'),
-  ('ask_nicely_requests','reviewed_at','TIMESTAMPTZ'), ('ask_nicely_requests','reviewed_by','UUID'),
-  ('ask_nicely_requests','shards_granted','INTEGER'),
-  ('ask_nicely_requests','status','TEXT NOT NULL DEFAULT ''pending'''),
-  ('ask_nicely_requests','user_id','UUID'), ('audit_log','action','TEXT'), ('audit_log','admin_id','UUID'),
-  ('audit_log','admin_username','TEXT'), ('audit_log','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('audit_log','details','TEXT'), ('audit_log','id','UUID DEFAULT gen_random_uuid()'),
-  ('audit_log','ip_address','TEXT'), ('audit_log','target_id','TEXT'), ('audit_log','target_type','TEXT'),
-  ('bans','banned_by','UUID'), ('bans','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('bans','expires_at','TIMESTAMPTZ'), ('bans','id','UUID DEFAULT gen_random_uuid()'),
-  ('bans','ip_address','TEXT'), ('bans','reason','TEXT'), ('bot_message_counters','bot_id','UUID'),
-  ('bot_message_counters','count','INTEGER NOT NULL DEFAULT 0'),
-  ('bot_message_counters','id','UUID DEFAULT gen_random_uuid()'),
-  ('bot_message_counters','minute_bucket','BIGINT'), ('conversation_keys','conversation_id','UUID'),
-  ('conversation_keys','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('conversation_keys','id','UUID DEFAULT gen_random_uuid()'),
-  ('conversation_keys','key_fingerprint','TEXT'), ('conversation_keys','user_id','UUID'),
-  ('conversation_keys','wrapped_by','UUID'), ('conversation_keys','wrapped_key','TEXT'),
-  ('conversation_master_keys','conversation_id','UUID'),
-  ('conversation_master_keys','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('conversation_master_keys','id','UUID DEFAULT gen_random_uuid()'),
-  ('conversation_master_keys','wrapped_for','TEXT NOT NULL DEFAULT ''master'''),
-  ('conversation_master_keys','wrapped_key','TEXT'), ('conversation_members','conversation_id','UUID'),
-  ('conversation_members','id','UUID DEFAULT gen_random_uuid()'),
-  ('conversation_members','is_group_admin','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('conversation_members','joined_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('conversation_members','last_read_at','TIMESTAMPTZ'),
-  ('conversation_members','muted','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('conversation_members','user_id','UUID'),
-  ('conversations','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('conversations','created_by','UUID'),
-  ('conversations','icon_url','TEXT'), ('conversations','id','UUID DEFAULT gen_random_uuid()'),
-  ('conversations','is_group','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('conversations','keep_forever','BOOLEAN NOT NULL DEFAULT FALSE'), ('conversations','name','TEXT'),
-  ('conversations','updated_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('core_transactions','amount','INTEGER'), ('core_transactions','balance_after','INTEGER'),
-  ('core_transactions','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('core_transactions','description','TEXT'), ('core_transactions','granted_by','UUID'),
-  ('core_transactions','id','UUID DEFAULT gen_random_uuid()'), ('core_transactions','metadata','JSONB'),
-  ('core_transactions','related_id','TEXT'), ('core_transactions','related_type','TEXT'),
-  ('core_transactions','transaction_type','TEXT'), ('core_transactions','user_id','UUID'),
-  ('custom_badges','color','TEXT DEFAULT ''#00d9ff'''),
-  ('custom_badges','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('custom_badges','created_by','UUID'),
-  ('custom_badges','description','TEXT'), ('custom_badges','icon','TEXT DEFAULT ''🏅'''),
-  ('custom_badges','id','UUID DEFAULT gen_random_uuid()'), ('custom_badges','name','TEXT'),
-  ('custom_badges','purchasable','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('custom_badges','shop_price','INTEGER NOT NULL DEFAULT 0'), ('friendships','accepted_at','TIMESTAMPTZ'),
-  ('friendships','addressee_id','UUID'), ('friendships','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('friendships','id','UUID DEFAULT gen_random_uuid()'), ('friendships','rejected_at','TIMESTAMPTZ'),
-  ('friendships','requester_id','UUID'), ('friendships','status','TEXT NOT NULL DEFAULT ''accepted'''),
-  ('immunity_list','added_by','UUID'), ('immunity_list','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('immunity_list','id','UUID DEFAULT gen_random_uuid()'), ('immunity_list','username','TEXT'),
-  ('invite_links','active','BOOLEAN NOT NULL DEFAULT TRUE'), ('invite_links','code','TEXT'),
-  ('invite_links','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('invite_links','created_by','UUID'),
-  ('invite_links','expires_at','TIMESTAMPTZ'), ('invite_links','id','UUID DEFAULT gen_random_uuid()'),
-  ('invite_links','max_uses','INTEGER'), ('invite_links','revoked','BOOLEAN NOT NULL DEFAULT FALSE'),
+  ('affiliate_codes','total_earned','INTEGER NOT NULL DEFAULT 0'),
+  ('affiliate_uses','referred_user_id','UUID'), ('conversation_members','last_read_at','TIMESTAMPTZ'),
+  ('conversations','icon_url','TEXT'), ('core_transactions','metadata','JSONB'),
+  ('friendships','status','TEXT NOT NULL DEFAULT ''accepted'''),
+  ('invite_links','active','BOOLEAN NOT NULL DEFAULT TRUE'),
   ('invite_links','uses','INTEGER NOT NULL DEFAULT 0'),
   ('invite_links','uses_count','INTEGER NOT NULL DEFAULT 0'),
-  ('invite_uses','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('invite_uses','id','UUID DEFAULT gen_random_uuid()'), ('invite_uses','invite_id','UUID'),
-  ('invite_uses','ip_address','TEXT'), ('invite_uses','user_id','UUID'),
-  ('master_key_meta','backup_iters','INTEGER NOT NULL DEFAULT 210000'),
-  ('master_key_meta','backup_iv','TEXT'), ('master_key_meta','backup_salt','TEXT'),
-  ('master_key_meta','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('master_key_meta','curve','TEXT NOT NULL DEFAULT ''P-256'''),
-  ('master_key_meta','encrypted_backup','TEXT'), ('master_key_meta','id','UUID DEFAULT gen_random_uuid()'),
-  ('master_key_meta','key_fingerprint','TEXT'), ('master_key_meta','public_key','TEXT'),
-  ('message_access_log','conversation_id','UUID'),
-  ('message_access_log','created_at','TIMESTAMPTZ DEFAULT NOW()'),
-  ('message_access_log','id','UUID DEFAULT gen_random_uuid()'), ('message_access_log','ip','TEXT'),
-  ('message_access_log','ip_address','TEXT'), ('message_access_log','reason','TEXT'),
-  ('message_access_log','target_user_id','UUID'), ('message_access_log','viewer_id','UUID'),
-  ('message_reactions','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('message_reactions','emoji','TEXT'), ('message_reactions','id','UUID DEFAULT gen_random_uuid()'),
-  ('message_reactions','message_id','UUID'), ('message_reactions','user_id','UUID'),
-  ('message_reads','id','UUID DEFAULT gen_random_uuid()'), ('message_reads','message_id','UUID'),
-  ('message_reads','read_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('message_reads','user_id','UUID'),
-  ('message_warnings','conversation_id','UUID'),
-  ('message_warnings','dismissed','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('message_warnings','id','UUID DEFAULT gen_random_uuid()'), ('message_warnings','user_id','UUID'),
-  ('messages','cipher_version','INTEGER'), ('messages','content','TEXT'),
-  ('messages','conversation_id','UUID'), ('messages','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('messages','deleted','BOOLEAN NOT NULL DEFAULT FALSE'), ('messages','edited_at','TIMESTAMPTZ'),
-  ('messages','expires_at','TIMESTAMPTZ'), ('messages','id','UUID DEFAULT gen_random_uuid()'),
-  ('messages','image_url','TEXT'), ('messages','is_anonymous','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('messages','sender_id','UUID'), ('messages','warning_sent','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('nickname_changes','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('nickname_changes','id','UUID DEFAULT gen_random_uuid()'), ('nickname_changes','ip_address','TEXT'),
-  ('nickname_changes','new_username','TEXT'), ('nickname_changes','old_username','TEXT'),
-  ('nickname_changes','user_id','UUID'), ('notifications','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('notifications','id','UUID DEFAULT gen_random_uuid()'), ('notifications','kind','TEXT'),
-  ('notifications','payload','JSONB NOT NULL DEFAULT ''{}''::jsonb'),
-  ('notifications','read','BOOLEAN NOT NULL DEFAULT FALSE'), ('notifications','user_id','UUID'),
-  ('recent_messages','content_hash','TEXT'),
-  ('recent_messages','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('recent_messages','id','UUID DEFAULT gen_random_uuid()'), ('recent_messages','user_id','UUID'),
-  ('recovery_keys','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('recovery_keys','id','UUID DEFAULT gen_random_uuid()'), ('recovery_keys','key_hash','TEXT'),
-  ('recovery_keys','method','TEXT'), ('recovery_keys','user_id','UUID'), ('shard_gifts','amount','INTEGER'),
-  ('shard_gifts','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('shard_gifts','id','UUID DEFAULT gen_random_uuid()'), ('shard_gifts','message','TEXT'),
-  ('shard_gifts','recipient_id','UUID'), ('shard_gifts','sender_id','UUID'),
-  ('shard_transactions','amount','INTEGER'), ('shard_transactions','balance_after','INTEGER'),
-  ('shard_transactions','created_at','TIMESTAMPTZ DEFAULT NOW()'),
-  ('shard_transactions','created_by','UUID'), ('shard_transactions','description','TEXT'),
-  ('shard_transactions','id','UUID DEFAULT gen_random_uuid()'), ('shard_transactions','related_id','TEXT'),
+  ('invite_uses','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('message_access_log','ip','TEXT'),
+  ('message_access_log','ip_address','TEXT'), ('message_access_log','target_user_id','UUID'),
+  ('messages','cipher_version','INTEGER'), ('messages','edited_at','TIMESTAMPTZ'),
+  ('recovery_keys','method','TEXT'), ('shard_transactions','balance_after','INTEGER'),
+  ('shard_transactions','created_by','UUID'), ('shard_transactions','related_id','TEXT'),
   ('shard_transactions','related_table','TEXT'), ('shard_transactions','transaction_type','TEXT'),
-  ('shard_transactions','type','TEXT'), ('shard_transactions','user_id','UUID'),
-  ('shop_items','active','BOOLEAN DEFAULT TRUE'), ('shop_items','category','TEXT'),
-  ('shop_items','created_at','TIMESTAMPTZ DEFAULT NOW()'), ('shop_items','css_class','TEXT'),
-  ('shop_items','currency','TEXT NOT NULL DEFAULT ''shards'''), ('shop_items','description','TEXT'),
-  ('shop_items','duration_days','INTEGER'), ('shop_items','effect_key','TEXT'),
-  ('shop_items','enabled','BOOLEAN NOT NULL DEFAULT TRUE'), ('shop_items','icon','TEXT'),
-  ('shop_items','id','UUID DEFAULT gen_random_uuid()'), ('shop_items','item_key','TEXT'),
-  ('shop_items','name','TEXT'), ('shop_items','one_time','BOOLEAN DEFAULT TRUE'),
-  ('shop_items','price','INTEGER'), ('shop_items','sort_order','INTEGER NOT NULL DEFAULT 0'),
-  ('sorry_uses','id','UUID DEFAULT gen_random_uuid()'),
-  ('sorry_uses','used_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('sorry_uses','user_id','UUID'),
-  ('sorry_uses','warning_reverted','INTEGER'),
-  ('spam_events','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('spam_events','id','UUID DEFAULT gen_random_uuid()'), ('spam_events','message_count','INTEGER'),
-  ('spam_events','trigger_reason','TEXT'), ('spam_events','user_id','UUID'),
-  ('spam_events','warning_number','INTEGER'),
-  ('spotlights','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('spotlights','expires_at','TIMESTAMPTZ'), ('spotlights','id','UUID DEFAULT gen_random_uuid()'),
-  ('spotlights','message','TEXT'), ('spotlights','tier','TEXT NOT NULL DEFAULT ''basic'''),
-  ('spotlights','user_id','UUID'), ('terms_acceptance','accepted_at','TIMESTAMPTZ DEFAULT NOW()'),
-  ('terms_acceptance','accepted_version','TEXT'), ('terms_acceptance','ip','TEXT'),
-  ('terms_acceptance','user_agent','TEXT'), ('terms_acceptance','user_id','UUID'),
-  ('terms_acceptance','version','TEXT DEFAULT ''1.0'''), ('typing_status','conversation_id','UUID'),
+  ('shop_items','currency','TEXT NOT NULL DEFAULT ''shards'''),
+  ('shop_items','enabled','BOOLEAN NOT NULL DEFAULT TRUE'), ('shop_items','item_key','TEXT'),
+  ('terms_acceptance','accepted_version','TEXT'), ('terms_acceptance','version','TEXT DEFAULT ''1.0'''),
   ('typing_status','id','UUID DEFAULT gen_random_uuid()'),
-  ('typing_status','started_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('typing_status','user_id','UUID'),
-  ('user_badges','badge_key','TEXT'), ('user_badges','granted_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('user_badges','granted_by','UUID'), ('user_badges','id','UUID DEFAULT gen_random_uuid()'),
-  ('user_badges','user_id','UUID'), ('user_keys','backup_iters','INTEGER NOT NULL DEFAULT 210000'),
-  ('user_keys','backup_iv','TEXT'), ('user_keys','backup_salt','TEXT'),
-  ('user_keys','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('user_keys','curve','TEXT NOT NULL DEFAULT ''P-256'''), ('user_keys','encrypted_backup','TEXT'),
-  ('user_keys','key_fingerprint','TEXT'), ('user_keys','public_key','TEXT'),
-  ('user_keys','updated_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'), ('user_keys','user_id','UUID'),
-  ('user_milestones','bonus_key','TEXT'),
-  ('user_milestones','claimed_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('user_milestones','id','UUID DEFAULT gen_random_uuid()'),
-  ('user_milestones','shards_awarded','INTEGER NOT NULL DEFAULT 0'), ('user_milestones','user_id','UUID'),
   ('user_profiles','active_badges','JSONB NOT NULL DEFAULT ''[]''::jsonb'),
-  ('user_profiles','active_bubble_color','TEXT'),
   ('user_profiles','active_effects','JSONB NOT NULL DEFAULT ''[]''::jsonb'),
-  ('user_profiles','active_message_animation','TEXT'), ('user_profiles','active_nickname_font','TEXT'),
-  ('user_profiles','avatar_url','TEXT'), ('user_profiles','banner_color','TEXT'),
-  ('user_profiles','bio','TEXT'), ('user_profiles','user_id','UUID'),
-  ('user_punishments','active','BOOLEAN NOT NULL DEFAULT TRUE'),
-  ('user_punishments','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
-  ('user_punishments','expires_at','TIMESTAMPTZ'),
-  ('user_punishments','id','UUID DEFAULT gen_random_uuid()'), ('user_punishments','punished_by','UUID'),
-  ('user_punishments','reason','TEXT'), ('user_punishments','type','TEXT'),
-  ('user_punishments','user_id','UUID'), ('user_purchases','equipped','BOOLEAN DEFAULT FALSE'),
-  ('user_purchases','expires_at','TIMESTAMPTZ'), ('user_purchases','id','UUID DEFAULT gen_random_uuid()'),
-  ('user_purchases','item_id','UUID'), ('user_purchases','price_paid','INTEGER'),
-  ('user_purchases','purchased_at','TIMESTAMPTZ DEFAULT NOW()'), ('user_purchases','user_id','UUID'),
-  ('users','admin_purchased_at','TIMESTAMPTZ'),
+  ('user_purchases','price_paid','INTEGER'), ('users','admin_purchased_at','TIMESTAMPTZ'),
   ('users','admin_via_purchase','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('users','anonymous_mode','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('users','ask_nicely_banned','BOOLEAN NOT NULL DEFAULT FALSE'), ('users','avatar_url','TEXT'),
@@ -284,14 +107,17 @@ BEGIN
   ('users','can_create_invites','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('users','can_grant_cores','BOOLEAN NOT NULL DEFAULT FALSE'),
   ('users','can_send_messages','BOOLEAN NOT NULL DEFAULT TRUE'),
-  ('users','cheat_warnings','INTEGER NOT NULL DEFAULT 0'), ('users','cores','INTEGER NOT NULL DEFAULT 0'),
+  ('users','cheat_warnings','INTEGER NOT NULL DEFAULT 0'),
+  ('users','cores','INTEGER NOT NULL DEFAULT 0'),
   ('users','created_at','TIMESTAMPTZ NOT NULL DEFAULT NOW()'),
   ('users','friend_privacy','TEXT NOT NULL DEFAULT ''approval'''),
   ('users','id','UUID DEFAULT gen_random_uuid()'), ('users','is_admin','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('users','is_bot','BOOLEAN NOT NULL DEFAULT FALSE'), ('users','is_owner','BOOLEAN NOT NULL DEFAULT FALSE'),
-  ('users','keep_all_forever','BOOLEAN NOT NULL DEFAULT FALSE'), ('users','last_daily_claim','TIMESTAMPTZ'),
-  ('users','last_ip','TEXT'), ('users','last_no_warning_check','TIMESTAMPTZ'),
-  ('users','last_seen','TIMESTAMPTZ'), ('users','last_warning_at','TIMESTAMPTZ'),
+  ('users','is_bot','BOOLEAN NOT NULL DEFAULT FALSE'),
+  ('users','is_owner','BOOLEAN NOT NULL DEFAULT FALSE'),
+  ('users','keep_all_forever','BOOLEAN NOT NULL DEFAULT FALSE'),
+  ('users','last_daily_claim','TIMESTAMPTZ'), ('users','last_ip','TEXT'),
+  ('users','last_no_warning_check','TIMESTAMPTZ'), ('users','last_seen','TIMESTAMPTZ'),
+  ('users','last_warning_at','TIMESTAMPTZ'),
   ('users','leaderboard_opt_out','BOOLEAN NOT NULL DEFAULT FALSE'), ('users','msg_animation','TEXT'),
   ('users','name_font','TEXT'), ('users','nickname_change_window_start','TIMESTAMPTZ'),
   ('users','nickname_changes_this_hour','INTEGER NOT NULL DEFAULT 0'),
@@ -300,8 +126,8 @@ BEGIN
   ('users','recovery_phrase','TEXT'), ('users','shards','INTEGER NOT NULL DEFAULT 0'),
   ('users','shards_earned_this_week','INTEGER NOT NULL DEFAULT 0'),
   ('users','shards_gifted_total','INTEGER NOT NULL DEFAULT 0'),
-  ('users','sorry_uses_this_week','INTEGER NOT NULL DEFAULT 0'), ('users','sorry_week_start','TIMESTAMPTZ'),
-  ('users','spam_warnings','INTEGER NOT NULL DEFAULT 0'),
+  ('users','sorry_uses_this_week','INTEGER NOT NULL DEFAULT 0'),
+  ('users','sorry_week_start','TIMESTAMPTZ'), ('users','spam_warnings','INTEGER NOT NULL DEFAULT 0'),
   ('users','streamer_mode','JSONB NOT NULL DEFAULT ''{}''::jsonb'),
   ('users','suspended','BOOLEAN NOT NULL DEFAULT FALSE'), ('users','suspended_until','TIMESTAMPTZ'),
   ('users','suspension_reason','TEXT'), ('users','theme_color','TEXT DEFAULT ''#00d9ff'''),
@@ -433,64 +259,56 @@ BEGIN
   END LOOP;
 END; $fn$;
 
-SELECT cipher_ensure_fk('messages','conversation_id','conversations','id','CASCADE');
-SELECT cipher_ensure_fk('messages','sender_id','users','id','SET NULL');
-SELECT cipher_ensure_fk('conversation_members','conversation_id','conversations','id','CASCADE');
-SELECT cipher_ensure_fk('conversation_members','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('message_reactions','message_id','messages','id','CASCADE');
-SELECT cipher_ensure_fk('message_reactions','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('message_reads','message_id','messages','id','CASCADE');
-SELECT cipher_ensure_fk('message_reads','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('message_warnings','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('typing_status','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('typing_status','conversation_id','conversations','id','CASCADE');
-SELECT cipher_ensure_fk('recent_messages','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_profiles','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_punishments','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('spam_events','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('admin_permissions','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_purchases','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_purchases','item_id','shop_items','id','CASCADE');
-SELECT cipher_ensure_fk('shard_transactions','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('core_transactions','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('affiliate_codes','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('affiliate_uses','code_id','affiliate_codes','id','CASCADE');
-SELECT cipher_ensure_fk('notifications','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('spotlights','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('admin_applications','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('ask_nicely_requests','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('anticheat_events','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('nickname_changes','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_milestones','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('sorry_uses','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_badges','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('bot_message_counters','bot_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('user_keys','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('conversation_keys','conversation_id','conversations','id','CASCADE');
-SELECT cipher_ensure_fk('conversation_keys','user_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('conversation_master_keys','conversation_id','conversations','id','CASCADE');
-SELECT cipher_ensure_fk('invite_uses','invite_id','invite_links','id','CASCADE');
-SELECT cipher_ensure_fk('invite_uses','user_id','users','id','CASCADE');
--- these two are embedded BY COLUMN NAME in app.py, so two links are fine
-SELECT cipher_ensure_fk('friendships','requester_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('friendships','addressee_id','users','id','CASCADE');
-SELECT cipher_ensure_fk('message_access_log','viewer_id','users','id','SET NULL');
-SELECT cipher_ensure_fk('message_access_log','target_user_id','users','id','SET NULL');
-
-SELECT cipher_drop_fk('affiliate_codes','approved_by');
-SELECT cipher_drop_fk('affiliate_codes','rejected_by');
-SELECT cipher_drop_fk('core_transactions','granted_by');
-SELECT cipher_drop_fk('ask_nicely_requests','reviewed_by');
-SELECT cipher_drop_fk('admin_applications','reviewed_by');
-SELECT cipher_drop_fk('affiliate_uses','new_user_id');
-SELECT cipher_drop_fk('affiliate_uses','referrer_id');
-SELECT cipher_drop_fk('affiliate_uses','referred_user_id');
-SELECT cipher_drop_fk('shard_transactions','created_by');
-SELECT cipher_drop_fk('admin_permissions','granted_by');
-SELECT cipher_drop_fk('user_badges','granted_by');
-SELECT cipher_drop_fk('custom_badges','created_by');
-SELECT cipher_drop_fk('conversation_keys','wrapped_by');
-SELECT cipher_drop_fk('users','bot_owner_id');
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT * FROM (VALUES
+   ('messages','conversation_id','conversations','CASCADE'),
+   ('messages','sender_id','users','SET NULL'),
+   ('conversation_members','conversation_id','conversations','CASCADE'),
+   ('conversation_members','user_id','users','CASCADE'),
+   ('message_reactions','message_id','messages','CASCADE'),
+   ('message_reactions','user_id','users','CASCADE'),
+   ('message_reads','message_id','messages','CASCADE'),
+   ('message_reads','user_id','users','CASCADE'), ('message_warnings','user_id','users','CASCADE'),
+   ('typing_status','user_id','users','CASCADE'),
+   ('typing_status','conversation_id','conversations','CASCADE'),
+   ('recent_messages','user_id','users','CASCADE'), ('user_profiles','user_id','users','CASCADE'),
+   ('user_punishments','user_id','users','CASCADE'), ('spam_events','user_id','users','CASCADE'),
+   ('admin_permissions','user_id','users','CASCADE'), ('user_purchases','user_id','users','CASCADE'),
+   ('user_purchases','item_id','shop_items','CASCADE'),
+   ('shard_transactions','user_id','users','CASCADE'),
+   ('core_transactions','user_id','users','CASCADE'),
+   ('affiliate_codes','user_id','users','CASCADE'),
+   ('affiliate_uses','code_id','affiliate_codes','CASCADE'),
+   ('notifications','user_id','users','CASCADE'), ('spotlights','user_id','users','CASCADE'),
+   ('admin_applications','user_id','users','CASCADE'),
+   ('ask_nicely_requests','user_id','users','CASCADE'),
+   ('anticheat_events','user_id','users','CASCADE'),
+   ('nickname_changes','user_id','users','CASCADE'), ('user_milestones','user_id','users','CASCADE'),
+   ('sorry_uses','user_id','users','CASCADE'), ('user_badges','user_id','users','CASCADE'),
+   ('bot_message_counters','bot_id','users','CASCADE'), ('user_keys','user_id','users','CASCADE'),
+   ('conversation_keys','conversation_id','conversations','CASCADE'),
+   ('conversation_keys','user_id','users','CASCADE'),
+   ('conversation_master_keys','conversation_id','conversations','CASCADE'),
+   ('invite_uses','invite_id','invite_links','CASCADE'), ('invite_uses','user_id','users','CASCADE'),
+   ('friendships','requester_id','users','CASCADE'),
+   ('friendships','addressee_id','users','CASCADE'),
+   ('message_access_log','viewer_id','users','SET NULL'),
+   ('message_access_log','target_user_id','users','SET NULL')
+  ) AS v(tbl,col,ref,ondel)
+  LOOP PERFORM cipher_ensure_fk(r.tbl,r.col,r.ref,'id',r.ondel); END LOOP;
+  FOR r IN SELECT * FROM (VALUES
+   ('affiliate_codes','approved_by'), ('affiliate_codes','rejected_by'),
+   ('core_transactions','granted_by'), ('ask_nicely_requests','reviewed_by'),
+   ('admin_applications','reviewed_by'), ('affiliate_uses','new_user_id'),
+   ('affiliate_uses','referrer_id'), ('affiliate_uses','referred_user_id'),
+   ('shard_transactions','created_by'), ('admin_permissions','granted_by'),
+   ('user_badges','granted_by'), ('custom_badges','created_by'), ('conversation_keys','wrapped_by'),
+   ('users','bot_owner_id')
+  ) AS v(tbl,col)
+  LOOP PERFORM cipher_drop_fk(r.tbl,r.col); END LOOP;
+END $$;
 
 DROP FUNCTION IF EXISTS cipher_ensure_fk(text,text,text,text,text);
 DROP FUNCTION IF EXISTS cipher_drop_fk(text,text);
