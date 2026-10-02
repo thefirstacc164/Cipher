@@ -1048,14 +1048,26 @@ CREATE INDEX IF NOT EXISTS idx_invite_links_code         ON invite_links(code);
 
 -- ============================================================================
 --   8. VIEW
+--   DROP + CREATE rather than CREATE OR REPLACE: replacing a view fails
+--   outright if an older version has a different column list, and that
+--   failure would roll back this whole transaction.
 -- ============================================================================
-CREATE OR REPLACE VIEW current_spotlight AS
-SELECT s.*, u.username, u.nickname_color
-FROM spotlights s
-JOIN users u ON u.id = s.user_id
-WHERE s.expires_at > NOW()
-ORDER BY s.created_at DESC
-LIMIT 1;
+DO $$
+BEGIN
+  EXECUTE 'DROP VIEW IF EXISTS current_spotlight';
+  EXECUTE $v$
+    CREATE VIEW current_spotlight AS
+    SELECT s.*, u.username, u.nickname_color
+    FROM spotlights s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.expires_at > NOW()
+    ORDER BY s.created_at DESC
+    LIMIT 1
+  $v$;
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cipher: current_spotlight view skipped (%)', SQLERRM;
+END $$;
+
 
 
 -- ============================================================================
@@ -1174,34 +1186,65 @@ BEGIN
   ]
   LOOP
     IF to_regclass('public.' || quote_ident(t)) IS NOT NULL THEN
-      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+      -- Per-table guard: ENABLE ROW LEVEL SECURITY requires table ownership.
+      -- One table owned by another role must not roll back the migration.
+      BEGIN
+        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+      EXCEPTION WHEN others THEN
+        RAISE NOTICE 'cipher: RLS not enabled on % (%)', t, SQLERRM;
+      END;
     END IF;
   END LOOP;
 END $$;
 
 
 -- ============================================================================
---  11. STORAGE BUCKETS
--- ============================================================================
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES ('cipher-avatars', 'cipher-avatars', true, 512000,
-        ARRAY['image/jpeg','image/png','image/webp','image/gif'])
-ON CONFLICT (id) DO UPDATE
-  SET public = true, file_size_limit = 512000;
-
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('cipher-vault', 'cipher-vault', false)
-ON CONFLICT (id) DO UPDATE SET public = false;
-
-
--- ============================================================================
---  12. CLEAN UP THE HELPERS
+--  11. CLEAN UP THE HELPERS
 --   They live in `public`, which PostgREST exposes as RPC. Remove them.
 -- ============================================================================
 DROP FUNCTION IF EXISTS cipher_ensure_fk(text, text, text, text, text);
 DROP FUNCTION IF EXISTS cipher_drop_fk(text, text);
 
 COMMIT;
+--   ^ Everything above is committed here. Nothing below can undo it.
+
+
+-- ============================================================================
+--  12. STORAGE BUCKETS
+--   DELIBERATELY OUTSIDE THE TRANSACTION, AND FAULT TOLERANT.
+--
+--   On current Supabase projects `storage.buckets` is owned by
+--   `supabase_storage_admin` and the SQL-editor role is frequently denied
+--   INSERT on it. When this ran inside the transaction above, that single
+--   "permission denied for table buckets" error rolled back the ENTIRE
+--   migration — every table and column silently un-applied. That is the
+--   failure mode this layout removes.
+--
+--   If it reports "skipped" below, create the buckets by hand in
+--   Dashboard -> Storage:
+--     cipher-avatars : PUBLIC,  512000 byte limit, image/jpeg|png|webp|gif
+--     cipher-vault   : PRIVATE, no MIME restriction (it holds ciphertext)
+-- ============================================================================
+DO $$
+BEGIN
+  INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+  VALUES ('cipher-avatars', 'cipher-avatars', true, 512000,
+          ARRAY['image/jpeg','image/png','image/webp','image/gif'])
+  ON CONFLICT (id) DO UPDATE SET public = true, file_size_limit = 512000;
+  RAISE NOTICE 'cipher: bucket cipher-avatars ok';
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cipher: bucket cipher-avatars SKIPPED - create it by hand (%)', SQLERRM;
+END $$;
+
+DO $$
+BEGIN
+  INSERT INTO storage.buckets (id, name, public)
+  VALUES ('cipher-vault', 'cipher-vault', false)
+  ON CONFLICT (id) DO UPDATE SET public = false;
+  RAISE NOTICE 'cipher: bucket cipher-vault ok';
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cipher: bucket cipher-vault SKIPPED - create it by hand (%)', SQLERRM;
+END $$;
 
 
 -- ============================================================================
